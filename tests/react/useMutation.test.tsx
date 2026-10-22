@@ -109,6 +109,35 @@ describe('useMutation', () => {
     expect(onSuccess).toHaveBeenCalledWith('cached after unmount', 'value', undefined);
   });
 
+  it('does not cancel when only the cancelOnUnmount option changes', async () => {
+    const client = createFluxCache();
+    const gate = deferred<string>();
+    let signal: AbortSignal | undefined;
+    const { result, rerender } = renderHook(
+      ({ cancelOnUnmount }: { cancelOnUnmount: boolean }) =>
+        useMutation<string, string>({
+          mutationFn: (_variables, context) => {
+            signal = context.signal;
+            return gate.promise;
+          },
+          cancelOnUnmount,
+        }),
+      { wrapper: wrapperFor(client), initialProps: { cancelOnUnmount: true } },
+    );
+
+    let pending!: Promise<MutationOutcome<string, string>>;
+    act(() => {
+      pending = result.current.mutateAsync('value');
+    });
+    rerender({ cancelOnUnmount: false });
+    expect(signal?.aborted).toBe(false);
+
+    gate.resolve('done');
+    expect((await pending).settled).toBe('fulfilled');
+    await flush();
+    expect(result.current).toMatchObject({ status: 'success', data: 'done' });
+  });
+
   it('cancels on unmount only when requested', async () => {
     const client = createFluxCache();
     const gate = deferred<string>();

@@ -278,7 +278,7 @@ export class MutationRunner<TData, TVariables, TContext = undefined> {
       settled,
       variables: generation.variables,
       data: settled === 'fulfilled' ? data : undefined,
-      error: error ?? undefined,
+      error: settled === 'failed' ? error : undefined,
     };
 
     if (this.active === generation) {

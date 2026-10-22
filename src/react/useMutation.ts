@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import {
   MutationRunner,
   type MutationOptions,
@@ -42,10 +42,16 @@ export function useMutation<TData, TVariables, TContext = undefined>(
 
   const snapshot = useSyncExternalStore(runner.subscribe, runner.getSnapshot, runner.getSnapshot);
 
-  useEffect(() => {
-    if (options.cancelOnUnmount !== true) return;
-    return () => runner.cancel();
-  }, [runner, options.cancelOnUnmount]);
+  const cancelOnUnmount = useRef(options.cancelOnUnmount);
+  cancelOnUnmount.current = options.cancelOnUnmount;
+  useEffect(
+    () => () => {
+      // Read at unmount so changing the option never cancels active work by
+      // itself; only leaving the component does.
+      if (cancelOnUnmount.current === true) runner.cancel();
+    },
+    [runner],
+  );
 
   return {
     ...snapshot,
