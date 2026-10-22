@@ -11,10 +11,10 @@ FluxCache is built on three rules:
 3. **Cache boundaries are explicit.** Freshness, invalidation and authentication
    scopes are configuration you can read and test, not hidden heuristics.
 
-> **Status: Phase B.** The core cache engine, React `useQuery`, bounded
-> prefetching and `usePrefetch` are implemented and tested. Mutation hooks,
-> a visual diagnostics panel and benchmarks (Phase C) are not part of this
-> release yet, and no performance numbers are claimed.
+> **Status: Phase C in progress.** The core cache engine, React `useQuery`,
+> bounded prefetching, `usePrefetch`, `useMutation` and `useInvalidate` are
+> implemented and tested. Diagnostics metrics and reproducible benchmarks are
+> being added in separate increments; no performance numbers are claimed yet.
 
 ## Install
 
@@ -255,7 +255,78 @@ const client = createFluxCache({
 });
 ```
 
+## Mutations
+
+`useMutation` runs one latest-wins mutation per hook instance. A new mutation
+aborts and settles the previous one as `superseded`; every caller receives an
+outcome. Requests continue after unmount by default, while the unmounted hook
+stops receiving state updates.
+
+```tsx
+import { useInvalidate, useMutation } from 'flux-cache/react';
+
+function RenameProduct({ productId }: { productId: string }) {
+  const invalidate = useInvalidate();
+  const rename = useMutation({
+    mutationFn: async ({ id, name }: { id: string; name: string }) => {
+      const response = await fetch(`/api/products/${id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return (await response.json()) as { id: string; name: string };
+    },
+    onSuccess: async (_product, { id }) => {
+      await invalidate(['product', id], { exact: true });
+      await invalidate(['products']);
+    },
+  });
+
+  return (
+    <button
+      type="button"
+      disabled={rename.isPending}
+      onClick={() => rename.mutate({ id: productId, name: 'New name' })}
+    >
+      {rename.isPending ? 'Saving…' : 'Rename'}
+    </button>
+  );
+}
+```
+
+| Option            | Notes                                                                                             |
+| ----------------- | ------------------------------------------------------------------------------------------------- |
+| `mutationFn`      | Required. Receives `(variables, { signal })`.                                                     |
+| `onMutate`        | Synchronous before the request; its return value is the callback context.                         |
+| `onSuccess`       | `(data, variables, context)`, only for fulfilled mutations.                                       |
+| `onError`         | `(error, variables, context)`, only for failed mutations.                                         |
+| `onSettled`       | `(data, error, variables, context, outcome)` once per started generation, except `scope-changed`. |
+| `cancelOnUnmount` | Default `false`; `true` aborts when the hook unmounts.                                            |
+
+The snapshot exposes `status` (`idle`, `pending`, `success`, `error`), `data`,
+`error`, `variables`, `failureCount`, `submittedAt`, `isIdle`, `isPending`,
+`isSuccess` and `isError`, plus stable `mutate`, `mutateAsync`, `cancel` and
+`reset` methods. `mutateAsync` always resolves and never rejects.
+
+Outcomes have `settled: 'fulfilled' | 'failed' | 'cancelled' | 'superseded' |
+'scope-changed'`, the submitted `variables`, `data` only when fulfilled, and
+`error` only when failed. `cancel()` and a scope change return the hook to
+`idle`. A scope change runs no callbacks, so old-scope code cannot invalidate
+new-scope data. Callback exceptions are logged and never change the outcome.
+
+### Optimistic updates are manual
+
+FluxCache does not patch cache entries automatically. The supported pattern
+writes through `setQueryData`, keeps the previous value and the exact optimistic
+object, and rolls back only when the cache still contains that object. See
+[Manual optimistic updates](docs/optimistic-updates.md) for the complete recipe
+and the concurrency, scope and cancellation cautions.
+
 ## Invalidate after a mutation
+
+`useInvalidate()` returns a stable function for mutation callbacks and effect
+dependencies. The imperative form remains available on the client:
 
 ```tsx
 import { useCacheClient } from 'flux-cache/react';
@@ -523,8 +594,8 @@ to the versions verified by this project rather than floating to newer majors.
 ## Limitations
 
 - Prefetching is explicit: there is no viewport observer, predictive scoring or
-  automatic prefetch of unseen routes. `useMutation` and the devtools panel are
-  not included in this release (Phase C).
+  automatic prefetch of unseen routes. Optimistic updates are manual; there is
+  no automatic mutation cache or optimistic engine.
 - Prefetches are bounded by `queueLimit`; under saturation some work is
   dropped on purpose and reported as `queue-full`.
 - No persistence, offline cache, window-focus or reconnect refetch, pagination,

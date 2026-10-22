@@ -24,11 +24,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   filtering and cancellation that preserves shared keep-alive requests.
 - Save-Data and slow-network prefetch safeguards with injectable `networkInfo`
   for tests and server rendering.
+- Framework-independent `MutationRunner` with latest-wins generations,
+  deterministic settlement, reference-count-free abort handling and
+  auth-scope-safe callback suppression.
+- React `useMutation` with serialized state, `cancel`/`reset`, optional
+  `cancelOnUnmount`, and requests that continue after unmount by default.
+- React `useInvalidate`, a stable helper for mutation callbacks.
+- [Manual optimistic-update guidance](docs/optimistic-updates.md) with explicit
+  cache-write ownership and rollback cautions.
 - Playwright coverage proving a hover prefetch is reused by the subsequent
   navigation without an extra request.
 
 ### Changed
 
+- Mutation outcomes and callback semantics are documented in
+  [Phase C contracts](docs/phase-c-contracts.md). `useMutation` exposes a
+  latest-wins snapshot; stale generations never overwrite current hook state.
 - `cancelQueries`/`removeQueries`/`clear` now also settle matching prefetch
   jobs and report `jobsCancelled`; `setAuthScope` reports `jobsDropped`.
 - `QueryOutcome` skip reasons now include `disabled` alongside `save-data`,
