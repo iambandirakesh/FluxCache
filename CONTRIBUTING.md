@@ -2,10 +2,20 @@
 
 ## Setup
 
+Use Node 22.12 or newer (`.nvmrc` is provided):
+
 ```bash
+nvm use
 pnpm install
 pnpm typecheck
 pnpm test
+```
+
+Browser tests for the example run against a production build:
+
+```bash
+pnpm exec playwright install chromium
+pnpm test:e2e
 ```
 
 ## Workflow

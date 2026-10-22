@@ -159,7 +159,7 @@ function Catalog({ onOpen }: { onOpen: (id: string) => void }) {
               Refresh failed: {messageOf(query.error)}. Showing the last good data.
             </p>
           ) : null}
-          <ul className="product-list">
+          <ul className="product-list" data-testid="product-list">
             {query.data?.map((product) => (
               <li key={product.id}>
                 <button type="button" className="product" onClick={() => onOpen(product.id)}>
@@ -353,11 +353,11 @@ function StatsPanel() {
     <footer className="stats" aria-label="Cache statistics">
       <div>
         <span className="stat-label">API requests</span>
-        <strong>{requests}</strong>
+        <strong data-testid="stat-requests">{requests}</strong>
       </div>
       <div>
         <span className="stat-label">Cache hits</span>
-        <strong>{stats.hits}</strong>
+        <strong data-testid="stat-hits">{stats.hits}</strong>
       </div>
       <div>
         <span className="stat-label">Network fetches</span>
@@ -373,7 +373,7 @@ function StatsPanel() {
       </div>
       <div>
         <span className="stat-label">Scope</span>
-        <strong>{scope.scopeTag}</strong>
+        <strong data-testid="stat-scope">{scope.scopeTag}</strong>
       </div>
     </footer>
   );

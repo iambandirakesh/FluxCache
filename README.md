@@ -359,15 +359,19 @@ pnpm typecheck      # tsc --noEmit
 pnpm lint           # eslint
 pnpm test           # vitest
 pnpm coverage       # vitest with coverage
+pnpm test:e2e       # Playwright smoke tests for the example (needs Chromium)
 pnpm build          # ESM + CJS + declarations
 pnpm check:package  # publint + arethetypeswrong
 pnpm verify         # all of the above
 ```
 
+Development uses Node 22.12+ (see [.nvmrc](.nvmrc)); the published library
+still declares Node 18+ support. The browser tests download Chromium once with
+`pnpm exec playwright install chromium`.
+
 Toolchain note: TypeScript is pinned to 5.9 because `typescript-eslint` 8 does
-not support TypeScript 7 yet. Vitest 4, Vite 7 and jsdom 26 are pinned for
-compatibility with Node 22.4 (jsdom 30 and tsup 9 require `require(esm)`
-support added in Node 22.12).
+not support TypeScript 7 yet. Vitest 4, Vite 7, tsup 8 and jsdom 26 are pinned
+to the versions verified by this project rather than floating to newer majors.
 
 ## Limitations
 
