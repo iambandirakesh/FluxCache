@@ -76,7 +76,8 @@ Every `queryFn` receives `{ queryKey, signal }`. Always pass `signal` to
 built package through its public entry points and a deterministic in-memory API.
 It demonstrates loading/success/error states, hover/focus prefetching, cache
 reuse across navigation, manual refetch, invalidation after a mutation,
-query-key changes and authentication-scope switching.
+query-key changes, authentication-scope switching and a live diagnostics panel
+with prefetch consumption metrics.
 
 ```bash
 pnpm install
@@ -244,6 +245,30 @@ the same commit rules as an observer. A queued job cannot start after a scope
 switch, a removed entry cannot be revived by a queued job, and a response that
 started before an invalidation or `setQueryData` cannot overwrite newer data.
 
+### Prefetch effectiveness
+
+A prefetch is only useful if a real consumer reads it while it is still fresh.
+`getStats()` reports a privacy-safe account of that work:
+
+| Counter                   | Meaning                                                                 |
+| ------------------------- | ----------------------------------------------------------------------- |
+| `prefetchProduced`        | Successful cache commits from requests started by a prefetch job.       |
+| `prefetchConsumed`        | Produced prefetches claimed by an observer or a `fetchQuery` cache hit. |
+| `prefetchWasted`          | Produced prefetches that expired, were replaced, or were removed first. |
+| `prefetchPending`         | Produced minus consumed minus wasted.                                   |
+| `prefetchConsumptionRate` | `consumed / (consumed + wasted)`, or `0` when nothing completed.        |
+
+A prefetch that joins an existing observer request is not counted as produced:
+it created no cache value of its own. A second prefetch reading a fresh value is
+also not a consumer. The rate excludes pending work, so it only describes
+prefetches that have already settled into consumed or wasted.
+
+Waste is recorded when the freshness timer expires, a key is invalidated, a
+newer request generation starts, `setQueryData` overwrites the value, or the
+entry is removed, garbage-collected, evicted or dropped by a scope change. The
+runnable example renders these counters in its diagnostics panel and shows only
+event types and reasons, never keys, payloads or scope values.
+
 Network hints are read lazily from `navigator.connection` when present. During
 SSR, or where the API is unavailable, prefetches proceed normally. Tests and
 non-browser runtimes can inject hints with `networkInfo`, and all safeguards can
@@ -410,22 +435,22 @@ const client = createFluxCache({
 });
 ```
 
-| Method                                                              | Returns                     | Notes                                                     |
-| ------------------------------------------------------------------- | --------------------------- | --------------------------------------------------------- |
-| `fetchQuery(key, queryFn, { staleTime, gcTime, retry, force })`     | `Promise<QueryOutcome<T>>`  | Joins active work; `force` always starts a new generation |
-| `prefetchQuery(key, queryFn, { priority, signal, ... })`            | `Promise<QueryOutcome<T>>`  | Bounded, deduplicated cache warming                       |
-| `getQueryData<T>(key)`                                              | `T \| undefined`            | Synchronous read of the active scope                      |
-| `getQueryState<T>(key)`                                             | `QueryState<T>`             | Data, error, timestamps, staleness                        |
-| `setQueryData(key, value \| updater)`                               | `QueryState<T>`             | Supersedes active requests                                |
-| `invalidateQueries(filter, { refetchActive, awaitRefetch, exact })` | `Promise<InvalidateResult>` | Marks stale; does not wait by default                     |
-| `refetchQueries(filter, { awaitSettled, exact })`                   | `Promise<RefetchResult>`    | New generation; awaits settlement by default              |
-| `cancelQueries(filter?)`                                            | `CancelResult`              | Synchronous; settles waiters immediately                  |
-| `removeQueries(filter)`                                             | `RemoveResult`              | Explicit removal wins over queued work                    |
-| `clear()`                                                           | `RemoveResult`              | Removes everything in the active scope                    |
-| `setAuthScope(scope \| null)`                                       | `ScopeChangeResult`         | See isolation above                                       |
-| `getAuthScope()`                                                    | `{ scopeTag, epoch }`       | Opaque tag only                                           |
-| `getStats()`                                                        | `FluxCacheStats`            | Operational counters, no keys or payloads                 |
-| `subscribe(listener)`                                               | `() => void`                | Diagnostic events                                         |
+| Method                                                              | Returns                     | Notes                                                        |
+| ------------------------------------------------------------------- | --------------------------- | ------------------------------------------------------------ |
+| `fetchQuery(key, queryFn, { staleTime, gcTime, retry, force })`     | `Promise<QueryOutcome<T>>`  | Joins active work; `force` always starts a new generation    |
+| `prefetchQuery(key, queryFn, { priority, signal, ... })`            | `Promise<QueryOutcome<T>>`  | Bounded, deduplicated cache warming                          |
+| `getQueryData<T>(key)`                                              | `T \| undefined`            | Synchronous read of the active scope                         |
+| `getQueryState<T>(key)`                                             | `QueryState<T>`             | Data, error, timestamps, staleness                           |
+| `setQueryData(key, value \| updater)`                               | `QueryState<T>`             | Supersedes active requests                                   |
+| `invalidateQueries(filter, { refetchActive, awaitRefetch, exact })` | `Promise<InvalidateResult>` | Marks stale; does not wait by default                        |
+| `refetchQueries(filter, { awaitSettled, exact })`                   | `Promise<RefetchResult>`    | New generation; awaits settlement by default                 |
+| `cancelQueries(filter?)`                                            | `CancelResult`              | Synchronous; settles waiters immediately                     |
+| `removeQueries(filter)`                                             | `RemoveResult`              | Explicit removal wins over queued work                       |
+| `clear()`                                                           | `RemoveResult`              | Removes everything in the active scope                       |
+| `setAuthScope(scope \| null)`                                       | `ScopeChangeResult`         | See isolation above                                          |
+| `getAuthScope()`                                                    | `{ scopeTag, epoch }`       | Opaque tag only                                              |
+| `getStats()`                                                        | `FluxCacheStats`            | Counters including prefetch consumption, no keys or payloads |
+| `subscribe(listener)`                                               | `() => void`                | Diagnostic events                                            |
 
 ### `QueryOutcome`
 
@@ -564,8 +589,12 @@ await pending;
   payloads, headers, tokens or scope values. Prefetch events follow the same
   rule and report outcomes, not payloads.
 - Prefetch counters (`prefetchQueued`, `prefetchDeduped`, `prefetchStarted`,
-  `prefetchFulfilled`, `prefetchFailed`, `prefetchSkipped`, `prefetchCancelled`)
-  are available through `getStats()`.
+  `prefetchFulfilled`, `prefetchFailed`, `prefetchSkipped`, `prefetchCancelled`,
+  `prefetchProduced`, `prefetchConsumed`, `prefetchWasted`, `prefetchPending`,
+  `prefetchConsumptionRate`) are available through `getStats()`. Their
+  denominators are documented in [Phase C contracts](docs/phase-c-contracts.md).
+- The example diagnostics panel records event types and reasons only. It never
+  renders key hashes, keys, payloads, credentials or scope values.
 - Authenticated responses are partitioned by scope; nothing is persisted to
   `localStorage` or cookies in this release.
 - Logging is limited to development warnings (clamped retry, invalid options).

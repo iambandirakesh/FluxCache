@@ -84,6 +84,7 @@ export function App() {
         ) : null}
       </main>
 
+      <DiagnosticsPanel />
       <StatsPanel />
     </div>
   );
@@ -349,6 +350,81 @@ function ErrorPanel({
         Retry
       </button>
     </div>
+  );
+}
+
+function DiagnosticsPanel() {
+  const client = useCacheClient();
+  const [stats, setStats] = useState(() => client.getStats());
+  const [events, setEvents] = useState<Array<{ type: string; reason?: string }>>([]);
+
+  useEffect(() => {
+    setStats(client.getStats());
+    return client.subscribe((event) => {
+      setStats(client.getStats());
+      if (!event.type.startsWith('prefetch:')) return;
+      const entry = { type: event.type, ...(event.reason ? { reason: event.reason } : {}) };
+      setEvents((previous) => [entry, ...previous].slice(0, 6));
+    });
+  }, [client]);
+
+  const rate =
+    stats.prefetchConsumed + stats.prefetchWasted === 0
+      ? '—'
+      : `${Math.round(stats.prefetchConsumptionRate * 100)}%`;
+
+  return (
+    <section className="diagnostics" aria-label="Cache diagnostics">
+      <div className="card-header">
+        <div>
+          <h2>Diagnostics</h2>
+          <p className="hint">
+            Prefetch effectiveness uses produced cache commits as its denominator; the rate excludes
+            pending work. Counters only: no keys, payloads or scope values.
+          </p>
+        </div>
+      </div>
+      <dl className="metrics">
+        <div>
+          <dt>Produced</dt>
+          <dd data-testid="diag-produced">{stats.prefetchProduced}</dd>
+        </div>
+        <div>
+          <dt>Consumed</dt>
+          <dd data-testid="diag-consumed">{stats.prefetchConsumed}</dd>
+        </div>
+        <div>
+          <dt>Wasted</dt>
+          <dd data-testid="diag-wasted">{stats.prefetchWasted}</dd>
+        </div>
+        <div>
+          <dt>Pending</dt>
+          <dd data-testid="diag-pending">{stats.prefetchPending}</dd>
+        </div>
+        <div>
+          <dt>Consumption rate</dt>
+          <dd data-testid="diag-rate">{rate}</dd>
+        </div>
+        <div>
+          <dt>Cache hits / misses</dt>
+          <dd>
+            {stats.hits} / {stats.misses}
+          </dd>
+        </div>
+      </dl>
+      <ol className="event-log" data-testid="diag-events" aria-label="Recent prefetch events">
+        {events.length === 0 ? (
+          <li className="hint">No prefetch events yet.</li>
+        ) : (
+          events.map((event, index) => (
+            <li key={`${event.type}-${index}`}>
+              <code>{event.type}</code>
+              {event.reason ? <span> · {event.reason}</span> : null}
+            </li>
+          ))
+        )}
+      </ol>
+    </section>
   );
 }
 

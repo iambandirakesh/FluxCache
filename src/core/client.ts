@@ -159,6 +159,9 @@ export class FluxCacheClient {
     prefetchFailed: 0,
     prefetchSkipped: 0,
     prefetchCancelled: 0,
+    prefetchProduced: 0,
+    prefetchConsumed: 0,
+    prefetchWasted: 0,
   };
 
   constructor(config: FluxCacheConfig = {}) {
@@ -271,6 +274,7 @@ export class FluxCacheClient {
   setQueryData<T>(key: QueryKey, updater: T | ((previous: T | undefined) => T)): QueryState<T> {
     canonicalizeQueryKey(key);
     const entry = this.ensureEntry(key, this.defaultEntryOptions());
+    if (entry.prefetch) this.wastePrefetch(entry, 'overwritten');
     const next =
       typeof updater === 'function'
         ? (updater as (previous: T | undefined) => T)(entry.hasData ? (entry.data as T) : undefined)
@@ -350,6 +354,7 @@ export class FluxCacheClient {
       'removed',
     );
     for (const entry of entries) {
+      if (entry.prefetch) this.wastePrefetch(entry, 'removed');
       this.detach(entry, 'removed');
       this.clearTimers(entry);
       this.entries.delete(entry.keyHash);
@@ -368,6 +373,7 @@ export class FluxCacheClient {
     }
     const jobsCancelled = this.prefetcher.cancelAll('removed');
     for (const entry of entries) {
+      if (entry.prefetch) this.wastePrefetch(entry, 'removed');
       this.detach(entry, 'removed');
       this.clearTimers(entry);
     }
@@ -403,6 +409,7 @@ export class FluxCacheClient {
     let requestsCancelled = 0;
     for (const entry of this.entries.values()) {
       if (entry.inFlight) requestsCancelled += 1;
+      if (entry.prefetch) this.wastePrefetch(entry, 'scope-changed');
       this.detach(entry, 'scope-changed');
       this.clearTimers(entry);
     }
@@ -445,11 +452,17 @@ export class FluxCacheClient {
   getStats(): FluxCacheStats {
     let inFlight = 0;
     for (const entry of this.entries.values()) if (entry.inFlight) inFlight += 1;
+    const completed = this.counters.prefetchConsumed + this.counters.prefetchWasted;
     return {
       size: this.entries.size,
       inFlight,
       observers: this.observers.size,
       ...this.counters,
+      prefetchPending:
+        this.counters.prefetchProduced -
+        this.counters.prefetchConsumed -
+        this.counters.prefetchWasted,
+      prefetchConsumptionRate: completed === 0 ? 0 : this.counters.prefetchConsumed / completed,
     };
   }
 
@@ -508,15 +521,23 @@ export class FluxCacheClient {
       };
     }
     this.counters.misses += 1;
-    const begun = this.beginFetch(entry, false);
+    const begun = this.beginFetch(entry, false, 'prefetch');
     return { promise: begun.promise, token: begun.token };
   }
 
   /** @internal */
   addEntryObserver(entry: CacheEntry, observer: ObserverLike): void {
+    const isNewObserver = !entry.observers.has(observer);
     entry.observers.add(observer);
     entry.lastAccessAt = this.now();
     this.clearGcTimer(entry);
+    if (isNewObserver && entry.prefetch) {
+      if (this.isEntryStale(entry)) {
+        this.wastePrefetch(entry, 'stale');
+      } else {
+        this.consumePrefetch(entry, 'observer');
+      }
+    }
   }
 
   /** @internal */
@@ -628,6 +649,7 @@ export class FluxCacheClient {
 
     if (entry.hasData && !entry.dirty && !this.isEntryStale(entry)) {
       this.counters.hits += 1;
+      this.consumePrefetch(entry, 'cache-hit');
       this.emit({ type: 'cache:hit', keyHash: entry.eventHash, at: this.now() });
       return {
         settled: 'skipped',
@@ -658,6 +680,7 @@ export class FluxCacheClient {
     const promises: Promise<QueryOutcome<unknown>>[] = [];
 
     for (const entry of entries) {
+      if (entry.prefetch) this.wastePrefetch(entry, 'invalidated');
       this.detach(entry, 'superseded');
       entry.generation += 1;
       entry.dirty = true;
@@ -861,6 +884,7 @@ export class FluxCacheClient {
       gcTimer: null,
       staleTimer: null,
       lastAccessAt: this.now(),
+      prefetch: null,
       options: {
         queryFn: options.queryFn,
         staleTime: options.staleTime,
@@ -884,7 +908,9 @@ export class FluxCacheClient {
   private beginFetch(
     entry: CacheEntry,
     keepAlive: boolean,
+    origin: 'query' | 'prefetch' = 'query',
   ): { fetch: InFlightFetch; token: FetchToken; promise: Promise<QueryOutcome<unknown>> } {
+    if (entry.prefetch) this.wastePrefetch(entry, 'new-request');
     let resolve!: (outcome: QueryOutcome<unknown>) => void;
     const promise = new Promise<QueryOutcome<unknown>>((resolvePromise) => {
       resolve = resolvePromise;
@@ -894,6 +920,7 @@ export class FluxCacheClient {
     const fetch: InFlightFetch = {
       entry,
       requestId: this.requestCounter,
+      origin,
       generation: entry.generation,
       scopeTag: this.tag,
       scopeEpoch: this.epoch,
@@ -999,6 +1026,7 @@ export class FluxCacheClient {
   }
 
   private commit(entry: CacheEntry, fetch: InFlightFetch, value: unknown): void {
+    if (entry.prefetch) this.wastePrefetch(entry, 'replaced');
     entry.data = value;
     entry.hasData = true;
     entry.dataUpdatedAt = this.now();
@@ -1008,6 +1036,14 @@ export class FluxCacheClient {
     entry.failureCount = 0;
     entry.inFlight = null;
     this.counters.fetchesSucceeded += 1;
+    if (fetch.origin === 'prefetch') {
+      this.counters.prefetchProduced += 1;
+      entry.prefetch = { generation: fetch.generation };
+      this.emit({ type: 'prefetch:produced', keyHash: entry.eventHash, at: this.now() });
+      if (entry.observers.size > 0 || fetch.hasKeepAlive) {
+        this.consumePrefetch(entry, 'joined');
+      }
+    }
     this.settle(fetch, {
       settled: 'fulfilled',
       source: 'network',
@@ -1110,9 +1146,13 @@ export class FluxCacheClient {
     if (!entry.hasData || entry.dataUpdatedAt === null || entry.dirty) return;
     if (entry.options.staleTime === Infinity) return;
     const delay = entry.dataUpdatedAt + entry.options.staleTime - this.now();
-    if (delay <= 0) return;
+    if (delay <= 0) {
+      if (entry.prefetch) this.wastePrefetch(entry, 'stale');
+      return;
+    }
     entry.staleTimer = setTimeout(() => {
       entry.staleTimer = null;
+      if (entry.prefetch) this.wastePrefetch(entry, 'stale');
       this.counters.staleFlips += 1;
       this.notifyEntry(entry);
     }, delay);
@@ -1137,6 +1177,7 @@ export class FluxCacheClient {
       entry.gcTimer = null;
       if (entry.observers.size > 0 || entry.inFlight) return;
       if (this.entries.get(entry.keyHash) !== entry) return;
+      if (entry.prefetch) this.wastePrefetch(entry, 'gc');
       this.entries.delete(entry.keyHash);
       this.clearTimers(entry);
       this.counters.gcRuns += 1;
@@ -1168,6 +1209,7 @@ export class FluxCacheClient {
 
     while (this.entries.size > this.maxEntries && candidates.length > 0) {
       const victim = candidates.shift() as CacheEntry;
+      if (victim.prefetch) this.wastePrefetch(victim, 'evicted');
       this.entries.delete(victim.keyHash);
       this.clearTimers(victim);
       this.counters.evictions += 1;
@@ -1191,6 +1233,30 @@ export class FluxCacheClient {
           ...(reason === undefined ? {} : { reason }),
         }),
     };
+  }
+
+  private consumePrefetch(entry: CacheEntry, reason: string): void {
+    if (!entry.prefetch) return;
+    entry.prefetch = null;
+    this.counters.prefetchConsumed += 1;
+    this.emit({
+      type: 'prefetch:consumed',
+      keyHash: entry.eventHash,
+      at: this.now(),
+      reason,
+    });
+  }
+
+  private wastePrefetch(entry: CacheEntry, reason: string): void {
+    if (!entry.prefetch) return;
+    entry.prefetch = null;
+    this.counters.prefetchWasted += 1;
+    this.emit({
+      type: 'prefetch:wasted',
+      keyHash: entry.eventHash,
+      at: this.now(),
+      reason,
+    });
   }
 
   private recordPrefetchMetric(metric: PrefetchMetric): void {

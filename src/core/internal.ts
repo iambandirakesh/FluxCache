@@ -23,6 +23,11 @@ export interface EntryOptions {
   retryDelay: (attempt: number) => number;
 }
 
+/** A prefetch-produced value that has not yet been consumed or wasted. */
+export interface PrefetchProvenance {
+  generation: number;
+}
+
 /** One cache entry. */
 export interface CacheEntry {
   key: QueryKey;
@@ -43,12 +48,14 @@ export interface CacheEntry {
   staleTimer: ReturnType<typeof setTimeout> | null;
   lastAccessAt: number;
   options: EntryOptions;
+  prefetch: PrefetchProvenance | null;
 }
 
 /** The single commit-eligible request for an entry. */
 export interface InFlightFetch {
   entry: CacheEntry;
   requestId: number;
+  origin: 'query' | 'prefetch';
   generation: number;
   scopeTag: string;
   scopeEpoch: number;

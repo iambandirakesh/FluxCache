@@ -37,6 +37,10 @@ test('prefetches a product on hover before navigation', async ({ page }) => {
   // The detail view joined the prefetch instead of starting a third request.
   await expect(page.getByTestId('stat-requests')).toHaveText('2');
   await expect(page.getByTestId('stat-prefetch')).toHaveText('1');
+  await expect(page.getByTestId('diag-produced')).toHaveText('1');
+  await expect(page.getByTestId('diag-consumed')).toHaveText('1');
+  await expect(page.getByTestId('diag-wasted')).toHaveText('0');
+  await expect(page.getByTestId('diag-rate')).toHaveText('100%');
 });
 
 test('reuses cached data when navigating away and back', async ({ page }) => {

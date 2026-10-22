@@ -272,6 +272,16 @@ export interface FluxCacheStats {
   prefetchFailed: number;
   prefetchSkipped: number;
   prefetchCancelled: number;
+  /** Successful cache commits produced by prefetch-started requests. */
+  prefetchProduced: number;
+  /** Produced prefetches consumed by an observer or fetchQuery. */
+  prefetchConsumed: number;
+  /** Produced prefetches that ended without a real consumer. */
+  prefetchWasted: number;
+  /** Produced prefetches not yet consumed or wasted. */
+  prefetchPending: number;
+  /** `consumed / (consumed + wasted)`; 0 when nothing has completed. */
+  prefetchConsumptionRate: number;
 }
 
 /** Diagnostic event. Contains no payloads, keys or credentials. */
@@ -291,7 +301,10 @@ export interface CacheEvent {
     | 'prefetch:queued'
     | 'prefetch:started'
     | 'prefetch:skipped'
-    | 'prefetch:settled';
+    | 'prefetch:settled'
+    | 'prefetch:produced'
+    | 'prefetch:consumed'
+    | 'prefetch:wasted';
   keyHash?: string;
   at: number;
   reason?: string;

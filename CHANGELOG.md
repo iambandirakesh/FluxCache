@@ -32,8 +32,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - React `useInvalidate`, a stable helper for mutation callbacks.
 - [Manual optimistic-update guidance](docs/optimistic-updates.md) with explicit
   cache-write ownership and rollback cautions.
+- Prefetch effectiveness counters: `prefetchProduced`, `prefetchConsumed`,
+  `prefetchWasted`, `prefetchPending` and `prefetchConsumptionRate`.
+- Prefetch provenance events (`prefetch:produced`, `prefetch:consumed`,
+  `prefetch:wasted`) and a live diagnostics panel in the runnable example.
 - Playwright coverage proving a hover prefetch is reused by the subsequent
-  navigation without an extra request.
+  navigation without an extra request, and that the diagnostics panel reports
+  the prefetch as consumed.
 
 ### Changed
 
@@ -45,4 +50,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `QueryOutcome` skip reasons now include `disabled` alongside `save-data`,
   `slow-network` and `queue-full`.
 - Prefetch diagnostics add `prefetch:queued`, `prefetch:started`,
-  `prefetch:skipped` and `prefetch:settled` events with key hashes only.
+  `prefetch:skipped`, `prefetch:settled`, `prefetch:produced`,
+  `prefetch:consumed` and `prefetch:wasted` events with key hashes only.
+- `FluxCacheStats` gained required prefetch-effectiveness members. Code that
+  constructs the object literally or compares it with exact deep equality must
+  add the new fields; normal `getStats()` consumers are unaffected.
