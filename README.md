@@ -1,0 +1,385 @@
+# FluxCache
+
+Predictable caching, request deduplication and explicit invalidation for React
+data fetching. No API keys, no accounts, no telemetry, no persistence.
+
+FluxCache is built on three rules:
+
+1. **Fetch once.** Concurrent consumers of the same key share one request.
+2. **Never let old data win.** Responses from superseded requests are discarded,
+   not merged.
+3. **Cache boundaries are explicit.** Freshness, invalidation and authentication
+   scopes are configuration you can read and test, not hidden heuristics.
+
+> **Status: Phase A.** The core cache engine and React `useQuery` are
+> implemented and tested. Hover prefetching (Phase B), mutation hooks and
+> visual diagnostics (Phase C) are not part of this release yet. Benchmarks
+> have not been measured yet and no performance numbers are claimed.
+
+## Install
+
+```bash
+npm install flux-cache
+# or: pnpm add flux-cache / yarn add flux-cache
+```
+
+React 18.3 and 19 are supported. React is an optional peer dependency: the core
+client works without it.
+
+## Quick start
+
+```tsx
+import { createFluxCache } from 'flux-cache';
+import { FluxCacheProvider } from 'flux-cache/react';
+import { useQuery } from 'flux-cache/react';
+
+type Product = { id: string; name: string };
+
+const client = createFluxCache();
+
+function App() {
+  return (
+    <FluxCacheProvider client={client}>
+      <ProductList />
+    </FluxCacheProvider>
+  );
+}
+
+function ProductList() {
+  const products = useQuery({
+    queryKey: ['products'],
+    queryFn: async ({ signal }) => {
+      const response = await fetch('/api/products', { signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return (await response.json()) as Product[];
+    },
+  });
+
+  if (products.isLoading) return <p>Loading…</p>;
+  if (products.isError) return <p role="alert">Could not load products</p>;
+  return (
+    <ul>
+      {products.data?.map((product) => (
+        <li key={product.id}>{product.name}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+Every `queryFn` receives `{ queryKey, signal }`. Always pass `signal` to
+`fetch` so cancellation and supersession stop the request when possible.
+
+## Runnable example
+
+[`examples/react-demo`](examples/react-demo) is a Vite + React app that uses the
+built package through its public entry points and a deterministic in-memory API.
+It demonstrates loading/success/error states, cache reuse across navigation,
+manual refetch, invalidation after a mutation, query-key changes and
+authentication-scope switching.
+
+```bash
+pnpm install
+pnpm build
+pnpm example:dev       # http://localhost:5173
+```
+
+See [examples/react-demo/README.md](examples/react-demo/README.md) for the guided
+tour. The project's `pnpm verify` also typechecks and builds the example.
+
+## Cache semantics
+
+| State            | Condition                              | What a read sees                                                  |
+| ---------------- | -------------------------------------- | ----------------------------------------------------------------- |
+| missing          | no entry                               | nothing; an observer mount starts a request                       |
+| fresh            | not dirty and younger than `staleTime` | cached data, no request                                           |
+| stale            | dirty or older than `staleTime`        | cached data immediately plus one background request when observed |
+| expired          | idle longer than `gcTime`              | entry removed; behaves as missing                                 |
+| error, with data | last refresh failed                    | last good data, `error` set, `status: 'success'`                  |
+| error, no data   | first request failed                   | `status: 'error'`, `error` set                                    |
+
+Rules that follow from this:
+
+- Renders, cache reads and diagnostic subscriptions never fetch.
+- Becoming stale does not poll or refetch; a mount, `refetch`, `invalidate` or
+  prefetch is required.
+- A failed background refresh never removes the last good data or moves
+  `dataUpdatedAt`.
+- `staleTime` and `gcTime` are independent. GC never removes an observed entry
+  or one with a request in flight.
+
+### Defaults
+
+| Option       | Default          | Meaning                                                     |
+| ------------ | ---------------- | ----------------------------------------------------------- |
+| `staleTime`  | `30_000` ms      | Data is reused without a request for this long              |
+| `gcTime`     | `300_000` ms     | Idle lifetime before an entry is removed                    |
+| `retry`      | `2`              | Retries after the first attempt (3 attempts total)          |
+| retry delay  | 1s, 2s (cap 30s) | Exponential, no jitter by default                           |
+| `maxEntries` | `500`            | Idle entries kept; LRU eviction, observed entries protected |     | `retryOn` | network, 408, 429, 5xx | 4xx errors are not retried; errors without an HTTP status are treated as transient |
+
+**The 30s default is a deliberate trade-off.** It makes cached data useful for
+navigation and makes prefetching worthwhile. Data that changes quickly or is
+sensitive should set `staleTime: 0` so every mount revalidates:
+
+```ts
+useQuery({ queryKey: ['balance'], queryFn, staleTime: 0 });
+```
+
+## Request lifecycle
+
+- One request per entry is commit-eligible. Requests superseded by a newer
+  generation continue at the transport level but can never write to the cache.
+- A request starts only when data is missing or stale; consumers join the
+  active request instead of starting another.
+- `refetch()` and `refetchQueries()` always bypass freshness and start a new
+  generation. Force semantics never join.
+- Invalidation marks the entry dirty and discards the active response. A late
+  response cannot make the entry fresh.
+- Retries belong to the same logical request and stop on cancellation,
+  supersession, scope change or a non-retryable error.
+
+## Invalidate after a mutation
+
+```tsx
+import { useCacheClient } from 'flux-cache/react';
+
+function RenameProduct({ productId }: { productId: string }) {
+  const client = useCacheClient();
+
+  async function rename(name: string) {
+    await fetch(`/api/products/${productId}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+
+    // Exact entry, plus the list that contains it.
+    await client.invalidateQueries(['product', productId], { exact: true });
+    await client.invalidateQueries(['products']);
+  }
+
+  return <button onClick={() => rename('New name')}>Rename</button>;
+}
+```
+
+`invalidateQueries` resolves as soon as refetches are scheduled. Pass
+`{ awaitRefetch: true }` when a caller must wait:
+
+```ts
+const result = await client.invalidateQueries(['products'], {
+  awaitRefetch: true,
+  refetchActive: true,
+});
+// result.invalidated, result.refetching, result.outcomes
+```
+
+Writes can also update the cache directly; an active request is superseded and
+can never overwrite the write:
+
+```ts
+client.setQueryData(['product', id], (current) =>
+  current ? { ...current, name: 'New name' } : current,
+);
+```
+
+## Authentication scope isolation
+
+Cache data must never cross users or tenants. Call `setAuthScope` whenever the
+signed-in identity changes, before fetching for the new identity:
+
+```ts
+useEffect(() => {
+  client.setAuthScope(session?.user.id ?? null);
+}, [client, session?.user.id]);
+```
+
+On a scope change the client:
+
+- drops every cached entry from the previous scope,
+- aborts active requests and settles their waiters with
+  `{ settled: 'scope-changed', data: undefined }`,
+- blocks late responses, late failures and retry timers from writing,
+- leaves mounted observers on a pending snapshot without fetching.
+
+It does not refetch automatically; the next mount, `refetch` or `invalidate`
+runs under the new scope. A value that was already returned to your code before
+the switch cannot be retroactively revoked — discard rendered state on account
+change yourself (unmount the subtree or key it by user id).
+
+Scope values are never used as query keys and never appear in events or
+counters.
+
+## Imperative API
+
+```ts
+const client = createFluxCache({
+  staleTime,
+  gcTime,
+  retry,
+  retryDelay,
+  maxEntries,
+  now,
+});
+```
+
+| Method                                                              | Returns                     | Notes                                                     |
+| ------------------------------------------------------------------- | --------------------------- | --------------------------------------------------------- |
+| `fetchQuery(key, queryFn, { staleTime, gcTime, retry, force })`     | `Promise<QueryOutcome<T>>`  | Joins active work; `force` always starts a new generation |
+| `getQueryData<T>(key)`                                              | `T \| undefined`            | Synchronous read of the active scope                      |
+| `getQueryState<T>(key)`                                             | `QueryState<T>`             | Data, error, timestamps, staleness                        |
+| `setQueryData(key, value \| updater)`                               | `QueryState<T>`             | Supersedes active requests                                |
+| `invalidateQueries(filter, { refetchActive, awaitRefetch, exact })` | `Promise<InvalidateResult>` | Marks stale; does not wait by default                     |
+| `refetchQueries(filter, { awaitSettled, exact })`                   | `Promise<RefetchResult>`    | New generation; awaits settlement by default              |
+| `cancelQueries(filter?)`                                            | `CancelResult`              | Synchronous; settles waiters immediately                  |
+| `removeQueries(filter)`                                             | `RemoveResult`              | Explicit removal wins over queued work                    |
+| `clear()`                                                           | `RemoveResult`              | Removes everything in the active scope                    |
+| `setAuthScope(scope \| null)`                                       | `ScopeChangeResult`         | See isolation above                                       |
+| `getAuthScope()`                                                    | `{ scopeTag, epoch }`       | Opaque tag only                                           |
+| `getStats()`                                                        | `FluxCacheStats`            | Operational counters, no keys or payloads                 |
+| `subscribe(listener)`                                               | `() => void`                | Diagnostic events                                         |
+
+### `QueryOutcome`
+
+Every fetch-shaped operation resolves (never rejects) with:
+
+```ts
+{
+  settled: 'fulfilled' | 'superseded' | 'cancelled' | 'removed'
+         | 'scope-changed' | 'failed' | 'skipped';
+  source?: 'network' | 'cache';
+  data: T | undefined;
+  dataUpdatedAt: number | null;
+  error?: unknown;
+  skipReason?: 'fresh' | 'no-query-fn' | ...;
+}
+```
+
+`data` rules: `superseded` and `removed` return the current/last cached value;
+`cancelled` and `scope-changed` always return `undefined`.
+
+Invalid arguments throw synchronously; a `queryFn` that throws resolves
+`{ settled: 'failed' }`.
+
+### `useQuery`
+
+| Option                 | Default         | Notes                                                            |
+| ---------------------- | --------------- | ---------------------------------------------------------------- |
+| `queryKey`             | required        | Serializable array; see [Query keys](#query-keys)                |
+| `queryFn`              | —               | Required to fetch; optional for cache-only reads                 |
+| `staleTime` / `gcTime` | client defaults | Per-query overrides                                              |
+| `retry` / `retryDelay` | client defaults | —                                                                |
+| `enabled`              | `true`          | `false` renders from cache without fetching                      |
+| `initialData`          | —               | Seeds the cache; treated as fresh at seed time                   |
+| `cancelOnUnmount`      | `false`         | Keep the request alive after the last observer leaves by default |
+
+The snapshot exposes `data`, `error`, `status`, `fetchStatus`, `hasData`,
+`isPending`, `isLoading`, `isSuccess`, `isError`, `isFetching`, `isStale`,
+`failureCount`, `dataUpdatedAt`, `errorUpdatedAt` and `refetch()`.
+
+`isLoading` means "no data yet and a request is running". A background refresh
+keeps `hasData` and `isStale` true, so render cached data and an inline spinner
+rather than a full-page loader.
+
+### Cancellation
+
+- Default unmount behavior is cache-warming: the request completes and caches.
+- `cancelOnUnmount: true` requests an abort when no keep-alive consumer remains.
+  Any observer with `cancelOnUnmount: false`, an unsettled `fetchQuery` waiter,
+  or a running prefetch keeps the request alive.
+- `cancelQueries()` is unconditional: it aborts, settles waiters as `cancelled`,
+  and revokes commit eligibility synchronously.
+- A `queryFn` that ignores `AbortSignal` still cannot write to the cache after
+  cancellation.
+
+### Query keys
+
+```ts
+[
+  'product',
+  id,
+] // array order matters
+[
+  ('products', { page: 1 })
+] // plain-object property order does not
+[('products', { page: 1, q: undefined })]; // === ['products', { page: 1 }]
+```
+
+Keys must be primitives, plain objects, arrays, `null` or `undefined`. Dates,
+Maps, class instances, functions, symbols, BigInt, `NaN`/`Infinity` and cycles
+throw `FluxCacheKeyError` synchronously. Convert dates to ISO strings. Never put
+tokens, passwords or other credentials in a key — keys are hashed for
+diagnostics, but they are still app-controlled data.
+
+`invalidateQueries([...])` and `refetchQueries([...])` match by prefix; pass
+`{ queryKey: [...], exact: true }` or the `exact` option for an exact match.
+
+## Framework-free core
+
+The cache engine does not import React. `QueryObserver` is usable on its own:
+
+```ts
+import { createFluxCache, QueryObserver } from 'flux-cache';
+
+const client = createFluxCache();
+const observer = new QueryObserver(client, {
+  queryKey: ['products'],
+  queryFn: ({ signal }) => fetch('/api/products', { signal }).then((r) => r.json()),
+});
+
+const unsubscribe = observer.subscribe(render);
+observer.mount();
+// later: observer.unmount(); unsubscribe();
+```
+
+## Testing helpers
+
+```ts
+import { deferred, flushMicrotasks } from 'flux-cache/testing';
+
+const gate = deferred<string>();
+const pending = client.fetchQuery(['key'], () => gate.promise);
+gate.resolve('value');
+await pending;
+```
+
+## Privacy and diagnostics
+
+- No telemetry is collected or transmitted.
+- Events contain an event type, a key hash and a timestamp — never keys,
+  payloads, headers, tokens or scope values.
+- Authenticated responses are partitioned by scope; nothing is persisted to
+  `localStorage` or cookies in this release.
+- Logging is limited to development warnings (clamped retry, invalid options).
+
+## Scripts
+
+```bash
+pnpm typecheck      # tsc --noEmit
+pnpm lint           # eslint
+pnpm test           # vitest
+pnpm coverage       # vitest with coverage
+pnpm build          # ESM + CJS + declarations
+pnpm check:package  # publint + arethetypeswrong
+pnpm verify         # all of the above
+```
+
+Toolchain note: TypeScript is pinned to 5.9 because `typescript-eslint` 8 does
+not support TypeScript 7 yet. Vitest 4, Vite 7 and jsdom 26 are pinned for
+compatibility with Node 22.4 (jsdom 30 and tsup 9 require `require(esm)`
+support added in Node 22.12).
+
+## Limitations
+
+- No prefetching, `useMutation`, or devtools panel in this release (Phases B/C).
+- No persistence, offline cache, window-focus or reconnect refetch, pagination,
+  infinite queries, `select`, or mutation cache.
+- No automatic dependency graph between queries: connect mutations to affected
+  keys explicitly.
+- One set of options per entry: the most recent writer wins for `staleTime`,
+  `gcTime` and retry settings of the same key.
+- No time-saved benchmark yet; no performance claims until measured.
+
+## License
+
+MIT
