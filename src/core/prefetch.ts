@@ -274,6 +274,16 @@ export class PrefetchScheduler {
     return promise;
   }
 
+  /** @internal Test-only view of scheduler pressure; not exported by the package. */
+  snapshot(): { queued: number; running: number; concurrency: number; queueLimit: number } {
+    return {
+      queued: this.queue.length,
+      running: this.running.size,
+      concurrency: this.concurrency,
+      queueLimit: this.queueLimit,
+    };
+  }
+
   /** Cancels every queued and running job. Returns how many were settled. */
   cancelAll(reason: CancelReason): number {
     const jobs = new Set<PrefetchJob>([...this.queue, ...this.running]);
