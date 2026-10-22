@@ -58,6 +58,12 @@ pnpm preview
 The footer shows API requests, cache hits, network fetches, prefetched entries,
 deduplicated joins, entry count and the opaque scope tag.
 
+The diagnostics panel above it shows prefetch effectiveness: **produced**,
+**consumed**, **wasted**, **pending** and the consumption rate. Hover a product
+and open it to see the prefetch move from pending to consumed. The rate is
+`consumed / (consumed + wasted)`; pending work is excluded. The event log shows
+only event types and reasons — never keys, payloads or scope values.
+
 ## Public API used
 
 | Feature             | API                                                                        |
@@ -70,6 +76,7 @@ deduplicated joins, entry count and the opaque scope tag.
 | Scope switch        | `client.setAuthScope(account)`                                             |
 | Reload after switch | `client.refetchQueries(() => true, { awaitSettled })`                      |
 | Diagnostics         | `client.getStats()`, `client.getAuthScope()`, `client.subscribe()`         |
+| Diagnostics panel   | Prefetch produced/consumed/wasted/pending counters and a safe event log    |
 
 ## Why the package resolves to `dist`
 

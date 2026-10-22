@@ -11,10 +11,10 @@ FluxCache is built on three rules:
 3. **Cache boundaries are explicit.** Freshness, invalidation and authentication
    scopes are configuration you can read and test, not hidden heuristics.
 
-> **Status: Phase C in progress.** The core cache engine, React `useQuery`,
-> bounded prefetching, `usePrefetch`, `useMutation` and `useInvalidate` are
-> implemented and tested. Diagnostics metrics and reproducible benchmarks are
-> being added in separate increments; no performance numbers are claimed yet.
+> **Status: Phase C.** The core cache engine, React `useQuery`, bounded
+> prefetching, `usePrefetch`, `useMutation`, `useInvalidate`, prefetch
+> effectiveness metrics and a reproducible benchmark harness are implemented
+> and tested. Benchmarks are descriptive only; no performance claims are made.
 
 ## Install
 
@@ -582,6 +582,25 @@ gate.resolve('value');
 await pending;
 ```
 
+## Benchmarks
+
+`bench/` contains a dependency-free, reproducible harness for core cache reads
+and writes, query cache hits, mutation lifecycle, observer mount/unmount and
+batched prefetch scheduling. It warms up first, uses fixed iteration counts,
+reports median and p95 across samples, and includes Node, OS, CPU, package and
+commit metadata in its JSON output.
+
+```bash
+pnpm bench
+pnpm bench -- --json --out bench/results/local.json
+pnpm bench:ci   # completion/shape check only; no latency thresholds
+```
+
+See [bench/README.md](bench/README.md) for methodology, options and the JSON
+schema. Do not compare results across machines or Node versions, and treat small
+differences as noise. CI runs `pnpm bench:ci` solely to prove the harness still
+completes and produces well-formed samples.
+
 ## Privacy and diagnostics
 
 - No telemetry is collected or transmitted.
@@ -607,6 +626,8 @@ pnpm lint           # eslint
 pnpm test           # vitest
 pnpm coverage       # vitest with coverage
 pnpm test:e2e       # Playwright smoke tests for the example (needs Chromium)
+pnpm bench          # reproducible descriptive benchmark (builds first)
+pnpm bench:ci       # benchmark completion/shape check for CI
 pnpm build          # ESM + CJS + declarations
 pnpm check:package  # publint + arethetypeswrong
 pnpm verify         # all of the above
@@ -633,7 +654,9 @@ to the versions verified by this project rather than floating to newer majors.
   keys explicitly.
 - One set of options per entry: the most recent writer wins for `staleTime`,
   `gcTime` and retry settings of the same key.
-- No time-saved benchmark yet; no performance claims until measured.
+- The benchmark harness is descriptive and single-process. It does not model
+  network latency, browser rendering or multi-tab contention, and it makes no
+  absolute performance claims.
 
 ## License
 

@@ -36,6 +36,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `prefetchWasted`, `prefetchPending` and `prefetchConsumptionRate`.
 - Prefetch provenance events (`prefetch:produced`, `prefetch:consumed`,
   `prefetch:wasted`) and a live diagnostics panel in the runnable example.
+- Dependency-free benchmark harness with warm-up, fixed iterations, samples,
+  median/p95 timings, environment metadata and JSON output, plus a
+  completion-only `bench:ci` check.
 - Playwright coverage proving a hover prefetch is reused by the subsequent
   navigation without an extra request, and that the diagnostics panel reports
   the prefetch as consumed.
