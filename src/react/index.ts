@@ -2,6 +2,7 @@
 
 export { FluxCacheProvider, useCacheClient, type FluxCacheProviderProps } from './context';
 export { useQuery } from './useQuery';
+export { usePrefetch, type PrefetchHandler, type UsePrefetchOptions } from './usePrefetch';
 export { cacheKeyHash, createFluxCache, FluxCacheClient } from '../core/client';
 export type { CacheClient } from '../core/client';
 export { FluxCacheKeyError } from '../core/errors';
@@ -16,6 +17,10 @@ export type {
   FluxCacheStats,
   InvalidateOptions,
   InvalidateResult,
+  NetworkInfo,
+  PrefetchConfig,
+  PrefetchPriority,
+  PrefetchQueryOptions,
   QueryFilter,
   QueryFn,
   QueryFnContext,

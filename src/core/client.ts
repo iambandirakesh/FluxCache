@@ -1,5 +1,16 @@
 import { canonicalizeQueryKey, hashQueryKey, queryKeysEqual, queryKeyStartsWith } from './key';
 import type { CacheEntry, EntryOptions, FetchToken, InFlightFetch, ObserverLike } from './internal';
+import {
+  isPrefetchPriority,
+  prefetchNetworkSkip,
+  PrefetchScheduler,
+  readNetworkInfo,
+  resolvePrefetchConfig,
+  type PrefetchEntryOptions,
+  type PrefetchHost,
+  type PrefetchMetric,
+  type ResolvedPrefetchConfig,
+} from './prefetch';
 import type {
   CacheEvent,
   CancelResult,
@@ -8,6 +19,9 @@ import type {
   FluxCacheStats,
   InvalidateOptions,
   InvalidateResult,
+  NetworkInfo,
+  PrefetchPriority,
+  PrefetchQueryOptions,
   QueryFilter,
   QueryFn,
   QueryKey,
@@ -19,6 +33,7 @@ import type {
   RemoveResult,
   ScopeChangeResult,
   Settled,
+  SkipReason,
 } from './types';
 
 const DEFAULT_STALE_TIME = 30_000;
@@ -54,6 +69,15 @@ function assertQueryFn(value: unknown): asserts value is QueryFn<unknown> {
   }
 }
 
+function isAbortSignal(value: unknown): value is AbortSignal {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as AbortSignal).aborted === 'boolean' &&
+    typeof (value as AbortSignal).addEventListener === 'function'
+  );
+}
+
 function isObjectFilter(
   filter: QueryFilter,
 ): filter is { queryKey: QueryKey; exact?: boolean | undefined } {
@@ -61,7 +85,7 @@ function isObjectFilter(
 }
 
 function skippedOutcome<T>(
-  reason: 'fresh' | 'no-query-fn' | 'removed' | 'cancelled',
+  reason: SkipReason,
   data?: T,
   dataUpdatedAt: number | null = null,
 ): QueryOutcome<T> {
@@ -98,6 +122,9 @@ export class FluxCacheClient {
   private readonly retryDelay: (attempt: number) => number;
   private readonly maxEntries: number;
   private readonly clock: () => number;
+  private readonly prefetchConfig: ResolvedPrefetchConfig;
+  private readonly networkInfo: () => NetworkInfo;
+  private readonly prefetcher: PrefetchScheduler;
 
   private readonly entries = new Map<string, CacheEntry>();
   private readonly observers = new Set<ObserverLike>();
@@ -125,6 +152,13 @@ export class FluxCacheClient {
     gcRuns: 0,
     staleFlips: 0,
     scopeChanges: 0,
+    prefetchQueued: 0,
+    prefetchDeduped: 0,
+    prefetchStarted: 0,
+    prefetchFulfilled: 0,
+    prefetchFailed: 0,
+    prefetchSkipped: 0,
+    prefetchCancelled: 0,
   };
 
   constructor(config: FluxCacheConfig = {}) {
@@ -142,6 +176,9 @@ export class FluxCacheClient {
     if (config.now !== undefined && typeof config.now !== 'function') {
       throw new TypeError('now must be a function');
     }
+    if (config.networkInfo !== undefined && typeof config.networkInfo !== 'function') {
+      throw new TypeError('networkInfo must be a function');
+    }
 
     this.staleTime = config.staleTime ?? DEFAULT_STALE_TIME;
     this.gcTime = config.gcTime ?? DEFAULT_GC_TIME;
@@ -152,6 +189,9 @@ export class FluxCacheClient {
     this.retryDelay = config.retryDelay ?? defaultRetryDelay;
     this.maxEntries = config.maxEntries ?? DEFAULT_MAX_ENTRIES;
     this.clock = config.now ?? (() => Date.now());
+    this.prefetchConfig = resolvePrefetchConfig(config.prefetch);
+    this.networkInfo = config.networkInfo ?? readNetworkInfo;
+    this.prefetcher = new PrefetchScheduler(this.prefetchHost(), this.prefetchConfig);
   }
 
   /** Current time as seen by the client. */
@@ -178,6 +218,35 @@ export class FluxCacheClient {
     assertQueryFn(queryFn);
     const resolved = this.resolveOptions(options);
     return this.runFetchQuery<T>(key, queryFn, resolved);
+  }
+
+  /**
+   * Warms the cache for a query without subscribing to it.
+   *
+   * Never rejects: freshness, deduplication, network and queue decisions are
+   * reported as outcomes. `signal` cancels queued work and releases a running
+   * prefetch (aborting the request when no other consumer needs it).
+   */
+  prefetchQuery<T>(
+    key: QueryKey,
+    queryFn: QueryFn<T>,
+    options: PrefetchQueryOptions = {},
+  ): Promise<QueryOutcome<T>> {
+    canonicalizeQueryKey(key);
+    assertQueryFn(queryFn);
+    const resolved = this.resolvePrefetchOptions(queryFn, options);
+
+    if (!this.prefetchConfig.enabled) {
+      return Promise.resolve(skippedOutcome<T>('disabled'));
+    }
+    if (resolved.signal?.aborted) {
+      return Promise.resolve(skippedOutcome<T>('cancelled'));
+    }
+    const networkSkip = prefetchNetworkSkip(this.networkInfo(), this.prefetchConfig);
+    if (networkSkip) {
+      return Promise.resolve(skippedOutcome<T>(networkSkip));
+    }
+    return this.runPrefetchQuery<T>(key, resolved);
   }
 
   /** Reads the current value for a key in the active scope. */
@@ -246,18 +315,25 @@ export class FluxCacheClient {
   /** Cancels matching active requests. Resolves nobody: it settles them. */
   cancelQueries(filter?: QueryFilter): CancelResult {
     const entries = filter === undefined ? [...this.entries.values()] : this.select(filter);
-    let cancelled = 0;
     let waitersSettled = 0;
     for (const entry of entries) {
       const fetch = entry.inFlight;
-      if (!fetch) continue;
-      waitersSettled += fetch.tokens.size;
+      if (fetch) waitersSettled += fetch.tokens.size;
+    }
+    const jobsCancelled =
+      filter === undefined
+        ? this.prefetcher.cancelAll('cancelled')
+        : this.prefetcher.cancelMatching((key) => this.keyMatches(key, filter), 'cancelled');
+
+    let cancelled = 0;
+    for (const entry of entries) {
+      if (!entry.inFlight) continue;
       this.detach(entry, 'cancelled');
       entry.generation += 1;
       cancelled += 1;
       this.notifyEntry(entry);
     }
-    return { cancelled, waitersSettled };
+    return { cancelled, waitersSettled, jobsCancelled };
   }
 
   /** Removes matching entries. An explicit removal beats any queued work. */
@@ -267,12 +343,19 @@ export class FluxCacheClient {
     for (const entry of entries) {
       const fetch = entry.inFlight;
       if (fetch) waitersSettled += fetch.tokens.size;
+    }
+    // Queued work must learn about the removal before its entry disappears.
+    const jobsCancelled = this.prefetcher.cancelMatching(
+      (key) => this.keyMatches(key, filter),
+      'removed',
+    );
+    for (const entry of entries) {
       this.detach(entry, 'removed');
       this.clearTimers(entry);
       this.entries.delete(entry.keyHash);
       this.notifyEntry(entry);
     }
-    return { removed: entries.length, waitersSettled };
+    return { removed: entries.length, waitersSettled, jobsCancelled };
   }
 
   /** Removes every entry in the active scope. */
@@ -282,6 +365,9 @@ export class FluxCacheClient {
     for (const entry of entries) {
       const fetch = entry.inFlight;
       if (fetch) waitersSettled += fetch.tokens.size;
+    }
+    const jobsCancelled = this.prefetcher.cancelAll('removed');
+    for (const entry of entries) {
       this.detach(entry, 'removed');
       this.clearTimers(entry);
     }
@@ -289,7 +375,7 @@ export class FluxCacheClient {
     // Notify only after removal so observers rebuild as pending, not from data
     // that is about to disappear.
     for (const entry of entries) this.notifyEntry(entry);
-    return { removed: entries.length, waitersSettled };
+    return { removed: entries.length, waitersSettled, jobsCancelled };
   }
 
   /**
@@ -320,6 +406,9 @@ export class FluxCacheClient {
       this.detach(entry, 'scope-changed');
       this.clearTimers(entry);
     }
+    // Prefetch jobs are settled only after their requests are detached, so a
+    // job can never start new work in the outgoing scope.
+    const jobsDropped = this.prefetcher.cancelAll('scope-changed');
 
     const entriesDropped = this.entries.size;
     const hadObservers = new Set<ObserverLike>();
@@ -343,7 +432,7 @@ export class FluxCacheClient {
       epoch: this.epoch,
       entriesDropped,
       requestsCancelled,
-      jobsDropped: 0,
+      jobsDropped,
     };
   }
 
@@ -399,6 +488,28 @@ export class FluxCacheClient {
   /** @internal */
   ensureEntryFor(key: QueryKey, options: QueryOptions<unknown>): CacheEntry {
     return this.ensureEntry(key, this.optionsFromQuery(key, options));
+  }
+
+  /** @internal */
+  ensurePrefetchEntry(key: QueryKey, options: PrefetchEntryOptions): CacheEntry {
+    return this.ensureEntry(key, options);
+  }
+
+  /** @internal Starts or joins the request a prefetch job will wait on. */
+  startPrefetchFetch(entry: CacheEntry): {
+    promise: Promise<QueryOutcome<unknown>>;
+    token: FetchToken;
+  } {
+    if (entry.inFlight) {
+      this.counters.dedupeJoins += 1;
+      return {
+        promise: entry.inFlight.promise,
+        token: this.join(entry.inFlight, false),
+      };
+    }
+    this.counters.misses += 1;
+    const begun = this.beginFetch(entry, false);
+    return { promise: begun.promise, token: begun.token };
   }
 
   /** @internal */
@@ -589,6 +700,77 @@ export class FluxCacheClient {
     if (!awaitSettled) return { refetched: promises.length, outcomes: [] };
     const outcomes = await Promise.all(promises);
     return { refetched: promises.length, outcomes: [...skipped, ...outcomes] };
+  }
+
+  private resolvePrefetchOptions<T>(
+    queryFn: QueryFn<T>,
+    options: PrefetchQueryOptions,
+  ): { entry: PrefetchEntryOptions; priority: PrefetchPriority; signal?: AbortSignal } {
+    if (options.priority !== undefined && !isPrefetchPriority(options.priority)) {
+      throw new TypeError('priority must be one of "high", "normal" or "low"');
+    }
+    if (options.staleTime !== undefined) assertTime(options.staleTime, 'staleTime');
+    if (options.gcTime !== undefined) assertTime(options.gcTime, 'gcTime');
+    if (options.retryDelay !== undefined && typeof options.retryDelay !== 'function') {
+      throw new TypeError('retryDelay must be a function');
+    }
+    if (options.signal !== undefined && !isAbortSignal(options.signal)) {
+      throw new TypeError('signal must be an AbortSignal');
+    }
+    return {
+      entry: {
+        queryFn: queryFn as QueryFn<unknown>,
+        staleTime: options.staleTime ?? this.staleTime,
+        gcTime: options.gcTime ?? this.gcTime,
+        retry:
+          options.retry === undefined
+            ? this.retry
+            : assertRetry(options.retry, (message) => this.warn(message)),
+        retryDelay: options.retryDelay ?? this.retryDelay,
+      },
+      priority: options.priority ?? 'normal',
+      signal: options.signal,
+    };
+  }
+
+  private async runPrefetchQuery<T>(
+    key: QueryKey,
+    resolved: { entry: PrefetchEntryOptions; priority: PrefetchPriority; signal?: AbortSignal },
+  ): Promise<QueryOutcome<T>> {
+    const entry = this.ensureEntry(key, resolved.entry);
+    entry.lastAccessAt = this.now();
+
+    if (entry.hasData && !entry.dirty && !this.isEntryStale(entry)) {
+      this.counters.hits += 1;
+      this.emit({ type: 'cache:hit', keyHash: entry.eventHash, at: this.now() });
+      return {
+        settled: 'skipped',
+        skipReason: 'fresh',
+        source: 'cache',
+        data: entry.data as T,
+        dataUpdatedAt: entry.dataUpdatedAt,
+      };
+    }
+
+    const running = entry.inFlight;
+    if (running) {
+      this.counters.dedupeJoins += 1;
+      const token = this.join(running, false);
+      const signal = resolved.signal;
+      if (signal) {
+        const onAbort = () => this.releaseToken(token);
+        signal.addEventListener('abort', onAbort, { once: true });
+        void running.promise.then(() => signal.removeEventListener('abort', onAbort));
+      }
+      return running.promise as Promise<QueryOutcome<T>>;
+    }
+
+    return this.prefetcher.enqueue(
+      key,
+      resolved.entry,
+      resolved.priority,
+      resolved.signal,
+    ) as Promise<QueryOutcome<T>>;
   }
 
   private resolveOptions(options: FetchQueryOptions): ResolvedFetchOptions {
@@ -908,16 +1090,19 @@ export class FluxCacheClient {
   }
 
   private select(filter: QueryFilter, exactOverride?: boolean): CacheEntry[] {
-    const entries = [...this.entries.values()];
-    if (typeof filter === 'function') return entries.filter((entry) => filter(entry.key));
+    return [...this.entries.values()].filter((entry) =>
+      this.keyMatches(entry.key, filter, exactOverride),
+    );
+  }
+
+  private keyMatches(key: QueryKey, filter: QueryFilter, exactOverride?: boolean): boolean {
+    if (typeof filter === 'function') return filter(key);
 
     const isKeyed = isObjectFilter(filter);
-    const key = isKeyed ? filter.queryKey : filter;
-    canonicalizeQueryKey(key);
+    const target = isKeyed ? filter.queryKey : filter;
+    canonicalizeQueryKey(target);
     const exact = exactOverride ?? (isKeyed ? filter.exact === true : false);
-    return entries.filter((entry) =>
-      exact ? queryKeysEqual(entry.key, key) : queryKeyStartsWith(entry.key, key),
-    );
+    return exact ? queryKeysEqual(key, target) : queryKeyStartsWith(key, target);
   }
 
   private scheduleStaleTimer(entry: CacheEntry): void {
@@ -987,6 +1172,50 @@ export class FluxCacheClient {
       this.clearTimers(victim);
       this.counters.evictions += 1;
       this.emit({ type: 'cache:evict', keyHash: victim.eventHash, at: this.now() });
+    }
+  }
+
+  private prefetchHost(): PrefetchHost {
+    return {
+      getAuthScope: () => this.getAuthScope(),
+      ensurePrefetchEntry: (key, options) => this.ensurePrefetchEntry(key, options),
+      isEntryStale: (entry) => this.isEntryStale(entry),
+      startPrefetchFetch: (entry) => this.startPrefetchFetch(entry),
+      releasePrefetchToken: (token) => this.releaseToken(token),
+      recordPrefetch: (metric) => this.recordPrefetchMetric(metric),
+      emitPrefetch: (type, keyHash, reason) =>
+        this.emit({
+          type,
+          keyHash,
+          at: this.now(),
+          ...(reason === undefined ? {} : { reason }),
+        }),
+    };
+  }
+
+  private recordPrefetchMetric(metric: PrefetchMetric): void {
+    switch (metric) {
+      case 'queued':
+        this.counters.prefetchQueued += 1;
+        break;
+      case 'deduped':
+        this.counters.prefetchDeduped += 1;
+        break;
+      case 'started':
+        this.counters.prefetchStarted += 1;
+        break;
+      case 'fulfilled':
+        this.counters.prefetchFulfilled += 1;
+        break;
+      case 'failed':
+        this.counters.prefetchFailed += 1;
+        break;
+      case 'skipped':
+        this.counters.prefetchSkipped += 1;
+        break;
+      case 'cancelled':
+        this.counters.prefetchCancelled += 1;
+        break;
     }
   }
 

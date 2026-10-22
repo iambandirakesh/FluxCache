@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import { useCacheClient, useQuery } from 'flux-cache/react';
+import { useCacheClient, usePrefetch, useQuery } from 'flux-cache/react';
 import * as api from './api';
 import type { Account } from './api';
 
@@ -162,10 +162,7 @@ function Catalog({ onOpen }: { onOpen: (id: string) => void }) {
           <ul className="product-list" data-testid="product-list">
             {query.data?.map((product) => (
               <li key={product.id}>
-                <button type="button" className="product" onClick={() => onOpen(product.id)}>
-                  <span className="product-name">{product.name}</span>
-                  <span className="product-price">${product.price}</span>
-                </button>
+                <ProductLink product={product} onOpen={onOpen} />
               </li>
             ))}
           </ul>
@@ -202,10 +199,32 @@ function Catalog({ onOpen }: { onOpen: (id: string) => void }) {
         </button>
       </div>
       <p className="hint">
-        Navigate to a product and back: the catalog renders instantly and the API request count
-        stays unchanged while the data is fresh.
+        Hover or focus a product to prefetch its detail; opening it should not add another API
+        request. Navigating back and reopening a cached product stays request-free while fresh.
       </p>
     </section>
+  );
+}
+
+function ProductLink({ product, onOpen }: { product: api.Product; onOpen: (id: string) => void }) {
+  const prefetch = usePrefetch({
+    queryKey: ['product', product.id],
+    queryFn: ({ signal }) => api.fetchProduct(product.id, { signal }),
+  });
+
+  return (
+    <button
+      type="button"
+      className="product"
+      onPointerEnter={prefetch}
+      onPointerLeave={prefetch.cancel}
+      onFocus={prefetch}
+      onBlur={prefetch.cancel}
+      onClick={() => onOpen(product.id)}
+    >
+      <span className="product-name">{product.name}</span>
+      <span className="product-price">${product.price}</span>
+    </button>
   );
 }
 
@@ -362,6 +381,10 @@ function StatsPanel() {
       <div>
         <span className="stat-label">Network fetches</span>
         <strong>{stats.fetchesStarted}</strong>
+      </div>
+      <div>
+        <span className="stat-label">Prefetched</span>
+        <strong data-testid="stat-prefetch">{stats.prefetchFulfilled}</strong>
       </div>
       <div>
         <span className="stat-label">Deduped joins</span>

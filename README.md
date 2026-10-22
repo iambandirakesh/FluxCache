@@ -11,10 +11,10 @@ FluxCache is built on three rules:
 3. **Cache boundaries are explicit.** Freshness, invalidation and authentication
    scopes are configuration you can read and test, not hidden heuristics.
 
-> **Status: Phase A.** The core cache engine and React `useQuery` are
-> implemented and tested. Hover prefetching (Phase B), mutation hooks and
-> visual diagnostics (Phase C) are not part of this release yet. Benchmarks
-> have not been measured yet and no performance numbers are claimed.
+> **Status: Phase B.** The core cache engine, React `useQuery`, bounded
+> prefetching and `usePrefetch` are implemented and tested. Mutation hooks,
+> a visual diagnostics panel and benchmarks (Phase C) are not part of this
+> release yet, and no performance numbers are claimed.
 
 ## Install
 
@@ -74,9 +74,9 @@ Every `queryFn` receives `{ queryKey, signal }`. Always pass `signal` to
 
 [`examples/react-demo`](examples/react-demo) is a Vite + React app that uses the
 built package through its public entry points and a deterministic in-memory API.
-It demonstrates loading/success/error states, cache reuse across navigation,
-manual refetch, invalidation after a mutation, query-key changes and
-authentication-scope switching.
+It demonstrates loading/success/error states, hover/focus prefetching, cache
+reuse across navigation, manual refetch, invalidation after a mutation,
+query-key changes and authentication-scope switching.
 
 ```bash
 pnpm install
@@ -138,6 +138,122 @@ useQuery({ queryKey: ['balance'], queryFn, staleTime: 0 });
   response cannot make the entry fresh.
 - Retries belong to the same logical request and stop on cancellation,
   supersession, scope change or a non-retryable error.
+
+## Prefetching
+
+Prefetching warms the cache for a key the user is likely to open next. It does
+not subscribe to the key, render anything, or change observer state.
+
+```tsx
+import { usePrefetch } from 'flux-cache/react';
+
+function ProductCard({ product }: { product: Product }) {
+  const prefetch = usePrefetch({
+    queryKey: ['product', product.id],
+    queryFn: ({ signal }) =>
+      fetch(`/api/products/${product.id}`, { signal }).then((response) => response.json()),
+    delay: 120,
+    priority: 'high',
+  });
+
+  return (
+    <a
+      href={`/products/${product.id}`}
+      onPointerEnter={prefetch}
+      onPointerLeave={prefetch.cancel}
+      onFocus={prefetch}
+      onBlur={prefetch.cancel}
+    >
+      {product.name}
+    </a>
+  );
+}
+```
+
+`usePrefetch` waits `delay` milliseconds after a hover or focus, debounces
+repeated triggers and ignores touch pointers. Leaving the element, blurring it,
+or calling `cancel()` clears the delay and aborts queued or running work.
+Unmounting alone only clears the delay, so a prefetch already started can
+finish as cache warming and be joined by the next route. An observer that joins
+the request with keep-alive semantics also keeps it alive; a prefetch never
+aborts shared work.
+
+The imperative form returns the same `QueryOutcome` contract as `fetchQuery`
+and never rejects:
+
+```ts
+const controller = new AbortController();
+const outcome = await client.prefetchQuery(['product', id], queryFn, {
+  priority: 'high',
+  signal: controller.signal,
+});
+```
+
+### Scheduler
+
+```ts
+const client = createFluxCache({
+  prefetch: {
+    enabled: true, // global switch
+    concurrency: 4, // running prefetch jobs
+    queueLimit: 100, // queued jobs; running jobs do not count
+    respectSaveData: true,
+    respectSlowNetwork: true,
+    slowConnections: ['slow-2g', '2g'],
+  },
+});
+```
+
+| Setting              | Default             | Behavior                                              |
+| -------------------- | ------------------- | ----------------------------------------------------- |
+| `enabled`            | `true`              | `false` resolves prefetches as `skipped` / `disabled` |
+| `concurrency`        | `4`                 | Maximum jobs fetching at once                         |
+| `queueLimit`         | `100`               | Maximum queued jobs; positive integer                 |
+| `respectSaveData`    | `true`              | Skip when `navigator.connection.saveData` is on       |
+| `respectSlowNetwork` | `true`              | Skip when `effectiveType` is in `slowConnections`     |
+| `slowConnections`    | `['slow-2g', '2g']` | Values that count as slow                             |
+
+Priorities are `high`, `normal` (default) and `low`. Jobs run highest priority
+first, FIFO within a priority. Equivalent jobs in the same scope and key are
+deduplicated, even when their options differ; the first queued job wins.
+
+Queue behavior is deterministic:
+
+- A job revalidates scope, cancellation, freshness and in-flight work when it
+  leaves the queue. Fresh data skips the job (`fresh`); an active request is
+  joined instead of duplicated.
+- The global switch and network safeguards are checked before freshness, so a
+  skipped prefetch reports `disabled`, `save-data` or `slow-network` even when
+  matching data is already cached.
+- When the queue is full, a new job evicts the lowest-priority queued job only
+  if that job's priority is strictly lower than the new job's. Among equally
+  low-priority candidates, the oldest queued job is evicted. Otherwise the new
+  job resolves `skipped` / `queue-full`. Running jobs are never evicted.
+- `cancelQueries` settles matching jobs as `cancelled`; `removeQueries` and
+  `clear` settle them as `removed`; a scope change settles every job as
+  `scope-changed` with no data.
+- Queue capacity and concurrency are enforced without timers. Every job settles
+  exactly once, including deduplicated, evicted, skipped, failed and aborted
+  jobs.
+
+### Scope, freshness and generation safety
+
+A prefetch is only a speculative `fetchQuery`. It installs the job under the
+current authentication scope, starts the current request generation, and obeys
+the same commit rules as an observer. A queued job cannot start after a scope
+switch, a removed entry cannot be revived by a queued job, and a response that
+started before an invalidation or `setQueryData` cannot overwrite newer data.
+
+Network hints are read lazily from `navigator.connection` when present. During
+SSR, or where the API is unavailable, prefetches proceed normally. Tests and
+non-browser runtimes can inject hints with `networkInfo`, and all safeguards can
+be disabled through `prefetch`:
+
+```ts
+const client = createFluxCache({
+  networkInfo: () => ({ saveData: false, effectiveType: '4g' }),
+});
+```
 
 ## Invalidate after a mutation
 
@@ -226,6 +342,7 @@ const client = createFluxCache({
 | Method                                                              | Returns                     | Notes                                                     |
 | ------------------------------------------------------------------- | --------------------------- | --------------------------------------------------------- |
 | `fetchQuery(key, queryFn, { staleTime, gcTime, retry, force })`     | `Promise<QueryOutcome<T>>`  | Joins active work; `force` always starts a new generation |
+| `prefetchQuery(key, queryFn, { priority, signal, ... })`            | `Promise<QueryOutcome<T>>`  | Bounded, deduplicated cache warming                       |
 | `getQueryData<T>(key)`                                              | `T \| undefined`            | Synchronous read of the active scope                      |
 | `getQueryState<T>(key)`                                             | `QueryState<T>`             | Data, error, timestamps, staleness                        |
 | `setQueryData(key, value \| updater)`                               | `QueryState<T>`             | Supersedes active requests                                |
@@ -251,7 +368,15 @@ Every fetch-shaped operation resolves (never rejects) with:
   data: T | undefined;
   dataUpdatedAt: number | null;
   error?: unknown;
-  skipReason?: 'fresh' | 'no-query-fn' | ...;
+  skipReason?:
+    | 'fresh'
+    | 'no-query-fn'
+    | 'removed'
+    | 'cancelled'
+    | 'save-data'
+    | 'slow-network'
+    | 'queue-full'
+    | 'disabled';
 }
 ```
 
@@ -281,6 +406,21 @@ The snapshot exposes `data`, `error`, `status`, `fetchStatus`, `hasData`,
 keeps `hasData` and `isStale` true, so render cached data and an inline spinner
 rather than a full-page loader.
 
+### `usePrefetch`
+
+| Option                 | Default  | Notes                                             |
+| ---------------------- | -------- | ------------------------------------------------- |
+| `queryKey`             | required | Same key the destination query will use           |
+| `queryFn`              | required | Used only if the cache is missing or stale        |
+| `delay`                | `120` ms | Debounce after hover/focus                        |
+| `priority`             | `high`   | `high`, `normal` or `low`                         |
+| `enabled`              | `true`   | `false` cancels pending work and ignores triggers |
+| `staleTime` / `gcTime` | client   | Per-prefetch overrides, stored on the entry       |
+| `retry` / `retryDelay` | client   | Retries belong to the prefetch request            |
+
+The returned handler is callable (`onPointerEnter`, `onFocus`) and exposes
+`cancel()` for `onPointerLeave`, `onBlur` or manual cleanup.
+
 ### Cancellation
 
 - Default unmount behavior is cache-warming: the request completes and caches.
@@ -288,7 +428,10 @@ rather than a full-page loader.
   Any observer with `cancelOnUnmount: false`, an unsettled `fetchQuery` waiter,
   or a running prefetch keeps the request alive.
 - `cancelQueries()` is unconditional: it aborts, settles waiters as `cancelled`,
-  and revokes commit eligibility synchronously.
+  and revokes commit eligibility synchronously. It also cancels queued and
+  running prefetch jobs.
+- Aborting a prefetch `signal` settles queued work as `cancelled` and releases
+  a running token; the request aborts only when no keep-alive consumer remains.
 - A `queryFn` that ignores `AbortSignal` still cannot write to the cache after
   cancellation.
 
@@ -347,7 +490,11 @@ await pending;
 
 - No telemetry is collected or transmitted.
 - Events contain an event type, a key hash and a timestamp — never keys,
-  payloads, headers, tokens or scope values.
+  payloads, headers, tokens or scope values. Prefetch events follow the same
+  rule and report outcomes, not payloads.
+- Prefetch counters (`prefetchQueued`, `prefetchDeduped`, `prefetchStarted`,
+  `prefetchFulfilled`, `prefetchFailed`, `prefetchSkipped`, `prefetchCancelled`)
+  are available through `getStats()`.
 - Authenticated responses are partitioned by scope; nothing is persisted to
   `localStorage` or cookies in this release.
 - Logging is limited to development warnings (clamped retry, invalid options).
@@ -375,7 +522,11 @@ to the versions verified by this project rather than floating to newer majors.
 
 ## Limitations
 
-- No prefetching, `useMutation`, or devtools panel in this release (Phases B/C).
+- Prefetching is explicit: there is no viewport observer, predictive scoring or
+  automatic prefetch of unseen routes. `useMutation` and the devtools panel are
+  not included in this release (Phase C).
+- Prefetches are bounded by `queueLimit`; under saturation some work is
+  dropped on purpose and reported as `queue-full`.
 - No persistence, offline cache, window-focus or reconnect refetch, pagination,
   infinite queries, `select`, or mutation cache.
 - No automatic dependency graph between queries: connect mutations to affected

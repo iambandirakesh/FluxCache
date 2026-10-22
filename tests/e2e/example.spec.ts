@@ -8,6 +8,9 @@ function product(page: Page, name: string | RegExp) {
 
 async function openCatalog(page: Page): Promise<void> {
   await page.goto('/');
+  // Keep the pointer away from product cards so hover prefetches cannot start
+  // unless a test asks for one explicitly.
+  await page.mouse.move(0, 0);
   await expect(page.getByTestId('product-list')).toBeVisible();
   await expect(page.getByTestId('stat-requests')).toHaveText('1');
 }
@@ -18,6 +21,22 @@ test('loads the catalog once and renders four products', async ({ page }) => {
   await expect(page.getByTestId('product-list')).toBeVisible();
   await expect(page.getByTestId('product-list').getByRole('listitem')).toHaveCount(4);
   await expect(page.getByTestId('stat-requests')).toHaveText('1');
+});
+
+test('prefetches a product on hover before navigation', async ({ page }) => {
+  await openCatalog(page);
+  const aurora = product(page, /Aurora Lamp/);
+
+  await aurora.hover();
+  // The prefetch starts before navigation, so it is the second request.
+  await expect(page.getByTestId('stat-requests')).toHaveText('2');
+  await expect(page.getByTestId('product-list')).toBeVisible();
+
+  await aurora.click();
+  await expect(page.getByText(AURORA_DESCRIPTION)).toBeVisible();
+  // The detail view joined the prefetch instead of starting a third request.
+  await expect(page.getByTestId('stat-requests')).toHaveText('2');
+  await expect(page.getByTestId('stat-prefetch')).toHaveText('1');
 });
 
 test('reuses cached data when navigating away and back', async ({ page }) => {
@@ -81,6 +100,7 @@ test('switches account without rendering old-scope data', async ({ page }) => {
   await expect(page.getByTestId('stat-requests')).toHaveText('1');
 
   await page.getByRole('button', { name: 'Load data for this account' }).click();
+  await page.mouse.move(0, 0);
   await expect(product(page, /Alpine Backpack/)).toBeVisible();
   await expect(page.getByText('Aurora Lamp')).toHaveCount(0);
   await expect(page.getByTestId('stat-requests')).toHaveText('2');
@@ -93,6 +113,7 @@ test('switches account without rendering old-scope data', async ({ page }) => {
   await expect(page.getByTestId('stat-requests')).toHaveText('2');
 
   await page.getByRole('button', { name: 'Load data for this account' }).click();
+  await page.mouse.move(0, 0);
   await expect(product(page, /Aurora Lamp/)).toBeVisible();
   await expect(page.getByTestId('stat-requests')).toHaveText('3');
 });

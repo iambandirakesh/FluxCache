@@ -17,3 +17,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Deterministic lifecycle and race-condition test suite.
 - Runnable Vite + React example (`examples/react-demo`) covering loading, error,
   cache reuse, refetch, invalidation, key changes and auth-scope switching.
+- Bounded prefetch scheduler with `prefetchQuery`, configurable concurrency and
+  queue capacity, priorities, queued-job deduplication and deterministic
+  saturation behavior.
+- React `usePrefetch` with debounced hover/focus triggers, touch-pointer
+  filtering and cancellation that preserves shared keep-alive requests.
+- Save-Data and slow-network prefetch safeguards with injectable `networkInfo`
+  for tests and server rendering.
+- Playwright coverage proving a hover prefetch is reused by the subsequent
+  navigation without an extra request.
+
+### Changed
+
+- `cancelQueries`/`removeQueries`/`clear` now also settle matching prefetch
+  jobs and report `jobsCancelled`; `setAuthScope` reports `jobsDropped`.
+- `QueryOutcome` skip reasons now include `disabled` alongside `save-data`,
+  `slow-network` and `queue-full`.
+- Prefetch diagnostics add `prefetch:queued`, `prefetch:started`,
+  `prefetch:skipped` and `prefetch:settled` events with key hashes only.

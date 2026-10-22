@@ -244,7 +244,7 @@ describe('cache lifecycle', () => {
     const pending = client.fetchQuery(key, fn);
 
     const result = client.cancelQueries();
-    expect(result).toEqual({ cancelled: 1, waitersSettled: 1 });
+    expect(result).toEqual({ cancelled: 1, waitersSettled: 1, jobsCancelled: 0 });
     expect((pending as unknown as { then?: unknown }).then).toBeTypeOf('function');
 
     const outcome = await pending;
@@ -371,7 +371,7 @@ describe('cache lifecycle', () => {
     const pending = client.fetchQuery(key, fn);
 
     const removed = client.removeQueries(key);
-    expect(removed).toEqual({ removed: 1, waitersSettled: 1 });
+    expect(removed).toEqual({ removed: 1, waitersSettled: 1, jobsCancelled: 0 });
 
     const outcome = await pending;
     expect(outcome.settled).toBe('removed');

@@ -73,6 +73,45 @@ export interface FetchQueryOptions {
   force?: boolean | undefined;
 }
 
+/** Relative urgency of a prefetch job. */
+export type PrefetchPriority = 'high' | 'normal' | 'low';
+
+/** Options for `prefetchQuery`. */
+export interface PrefetchQueryOptions {
+  /** Scheduling priority; higher priorities run first. Default `normal`. */
+  priority?: PrefetchPriority | undefined;
+  staleTime?: number | undefined;
+  gcTime?: number | undefined;
+  retry?: number | undefined;
+  retryDelay?: ((attempt: number) => number) | undefined;
+  /** Aborts a queued prefetch or releases a running one. */
+  signal?: AbortSignal | undefined;
+}
+
+/** Network hints used by prefetch safeguards. */
+export interface NetworkInfo {
+  /** `navigator.connection.saveData`, when available. */
+  saveData?: boolean | undefined;
+  /** `navigator.connection.effectiveType`, when available. */
+  effectiveType?: string | undefined;
+}
+
+/** Prefetch scheduler and network-safeguard configuration. */
+export interface PrefetchConfig {
+  /** Global prefetch switch. Default true. */
+  enabled?: boolean | undefined;
+  /** Maximum concurrent prefetch jobs. Default 4. */
+  concurrency?: number | undefined;
+  /** Maximum queued prefetch jobs; running jobs do not count. Default 100. */
+  queueLimit?: number | undefined;
+  /** Skip prefetching when Save-Data is on. Default true. */
+  respectSaveData?: boolean | undefined;
+  /** Skip prefetching on slow connections. Default true. */
+  respectSlowNetwork?: boolean | undefined;
+  /** `effectiveType` values treated as slow. Default `['slow-2g', '2g']`. */
+  slowConnections?: readonly string[] | undefined;
+}
+
 /** Resolved options with defaults applied. */
 export interface ResolvedQueryOptions {
   staleTime: number;
@@ -88,7 +127,14 @@ export type Settled =
 
 /** Reason a fetch-shaped operation was skipped without doing work. */
 export type SkipReason =
-  'fresh' | 'no-query-fn' | 'removed' | 'cancelled' | 'save-data' | 'slow-network' | 'queue-full';
+  | 'fresh'
+  | 'no-query-fn'
+  | 'removed'
+  | 'cancelled'
+  | 'save-data'
+  | 'slow-network'
+  | 'queue-full'
+  | 'disabled';
 
 /**
  * Result of every fetch-shaped operation.
@@ -177,12 +223,16 @@ export interface RefetchResult {
 export interface CancelResult {
   cancelled: number;
   waitersSettled: number;
+  /** Queued or running prefetch jobs settled as cancelled. */
+  jobsCancelled: number;
 }
 
 /** Result of `removeQueries` and `clear`. */
 export interface RemoveResult {
   removed: number;
   waitersSettled: number;
+  /** Queued or running prefetch jobs settled as removed. */
+  jobsCancelled: number;
 }
 
 /** Result of `setAuthScope`. */
@@ -215,6 +265,13 @@ export interface FluxCacheStats {
   gcRuns: number;
   staleFlips: number;
   scopeChanges: number;
+  prefetchQueued: number;
+  prefetchDeduped: number;
+  prefetchStarted: number;
+  prefetchFulfilled: number;
+  prefetchFailed: number;
+  prefetchSkipped: number;
+  prefetchCancelled: number;
 }
 
 /** Diagnostic event. Contains no payloads, keys or credentials. */
@@ -230,7 +287,11 @@ export interface CacheEvent {
     | 'cache:evict'
     | 'cache:gc'
     | 'invalidate'
-    | 'scope:change';
+    | 'scope:change'
+    | 'prefetch:queued'
+    | 'prefetch:started'
+    | 'prefetch:skipped'
+    | 'prefetch:settled';
   keyHash?: string;
   at: number;
   reason?: string;
@@ -250,4 +311,8 @@ export interface FluxCacheConfig {
   maxEntries?: number;
   /** Clock injection for tests. Defaults to `Date.now`. */
   now?: () => number;
+  /** Prefetch scheduling and network safeguards. */
+  prefetch?: PrefetchConfig | undefined;
+  /** Network-hint injection for tests and non-browser runtimes. */
+  networkInfo?: (() => NetworkInfo) | undefined;
 }
