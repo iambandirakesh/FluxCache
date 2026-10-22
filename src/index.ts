@@ -9,6 +9,16 @@ export {
   queryKeyStartsWith,
 } from './core/key';
 export { QueryObserver } from './core/observer';
+export { MutationRunner } from './core/mutation';
+export type {
+  MutationFn,
+  MutationFnContext,
+  MutationOptions,
+  MutationOutcome,
+  MutationSettled,
+  MutationSnapshot,
+  MutationStatus,
+} from './core/mutation';
 export type {
   CacheEvent,
   CancelResult,
