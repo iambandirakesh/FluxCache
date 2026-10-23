@@ -72,7 +72,7 @@ Every `queryFn` receives `{ queryKey, signal }`. Always pass `signal` to
 
 ## Runnable example
 
-[`examples/react-demo`](examples/react-demo) is a Vite + React app that uses the
+`examples/react-demo` is a Vite + React app that uses the
 built package through its public entry points and a deterministic in-memory API.
 It demonstrates loading/success/error states, hover/focus prefetching, cache
 reuse across navigation, manual refetch, invalidation after a mutation,
@@ -85,8 +85,8 @@ pnpm build
 pnpm example:dev       # http://localhost:5173
 ```
 
-See [examples/react-demo/README.md](examples/react-demo/README.md) for the guided
-tour. The project's `pnpm verify` also typechecks and builds the example.
+See `examples/react-demo/README.md` in the repository for the guided tour. The
+project's `pnpm verify` also typechecks and builds the example.
 
 ## Cache semantics
 
@@ -111,13 +111,14 @@ Rules that follow from this:
 
 ### Defaults
 
-| Option       | Default          | Meaning                                                     |
-| ------------ | ---------------- | ----------------------------------------------------------- |
-| `staleTime`  | `30_000` ms      | Data is reused without a request for this long              |
-| `gcTime`     | `300_000` ms     | Idle lifetime before an entry is removed                    |
-| `retry`      | `2`              | Retries after the first attempt (3 attempts total)          |
-| retry delay  | 1s, 2s (cap 30s) | Exponential, no jitter by default                           |
-| `maxEntries` | `500`            | Idle entries kept; LRU eviction, observed entries protected |     | `retryOn` | network, 408, 429, 5xx | 4xx errors are not retried; errors without an HTTP status are treated as transient |
+| Option       | Default                | Meaning                                                                            |
+| ------------ | ---------------------- | ---------------------------------------------------------------------------------- |
+| `staleTime`  | `30_000` ms            | Data is reused without a request for this long                                     |
+| `gcTime`     | `300_000` ms           | Idle lifetime before an entry is removed                                           |
+| `retry`      | `2`                    | Retries after the first attempt (3 attempts total)                                 |
+| retry delay  | 1s, 2s (cap 30s)       | Exponential, no jitter by default                                                  |
+| `maxEntries` | `500`                  | Idle entries kept; LRU eviction, observed entries protected                        |
+| retry policy | network, 408, 429, 5xx | 4xx errors are not retried; errors without an HTTP status are treated as transient |
 
 **The 30s default is a deliberate trade-off.** It makes cached data useful for
 navigation and makes prefetching worthwhile. Data that changes quickly or is
@@ -338,7 +339,8 @@ Outcomes have `settled: 'fulfilled' | 'failed' | 'cancelled' | 'superseded' |
 'scope-changed'`, the submitted `variables`, `data` only when fulfilled, and
 `error` only when failed. `cancel()` and a scope change return the hook to
 `idle`. A scope change runs no callbacks, so old-scope code cannot invalidate
-new-scope data. Callback exceptions are logged and never change the outcome.
+new-scope data. Callback exceptions and rejected async callbacks are logged and
+never change the outcome; callbacks are not awaited by `mutateAsync`.
 
 ### Optimistic updates are manual
 
@@ -534,14 +536,9 @@ The returned handler is callable (`onPointerEnter`, `onFocus`) and exposes
 ### Query keys
 
 ```ts
-[
-  'product',
-  id,
-] // array order matters
-[
-  ('products', { page: 1 })
-] // plain-object property order does not
-[('products', { page: 1, q: undefined })]; // === ['products', { page: 1 }]
+const byId = ['product', id]; // array order matters
+const byPage = ['products', { page: 1 }]; // object property order does not
+const normalized = ['products', { page: 1, q: undefined }]; // same cache key as above
 ```
 
 Keys must be primitives, plain objects, arrays, `null` or `undefined`. Dates,
@@ -630,10 +627,10 @@ pnpm bench          # reproducible descriptive benchmark (builds first)
 pnpm bench:ci       # benchmark completion/shape check for CI
 pnpm build          # ESM + CJS + declarations
 pnpm check:package  # publint + arethetypeswrong
-pnpm verify         # all of the above
+pnpm verify         # typecheck, lint, format, tests, build, example and package checks
 ```
 
-Development uses Node 22.12+ (see [.nvmrc](.nvmrc)); the published library
+Development uses Node 22.12+ (see the repository's `.nvmrc`); the published library
 still declares Node 18+ support. The browser tests download Chromium once with
 `pnpm exec playwright install chromium`.
 

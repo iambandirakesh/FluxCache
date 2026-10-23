@@ -14,6 +14,7 @@
     "verbatimModuleSyntax": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
+    "stripInternal": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "types": ["node"]

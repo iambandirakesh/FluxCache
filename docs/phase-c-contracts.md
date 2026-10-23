@@ -86,10 +86,12 @@ For an accepted generation:
 
 Callback failures are contained. A thrown `onMutate`, `onSuccess`, `onError` or
 `onSettled` is reported with `console.warn` and does not change the mutation
-outcome. A thrown `onMutate` leaves the context `undefined` and the mutation
-continues. `onSuccess` and `onError` are called at most once. `onSettled` is
-called exactly once for every started generation except `scope-changed`, which
-is intentionally silent.
+outcome. A rejected promise returned by a settlement callback is also caught and
+reported. Callbacks are not awaited: asynchronous invalidation starts after the
+mutation has settled, so `mutateAsync` does not wait for it. A thrown `onMutate`
+leaves the context `undefined` and the mutation continues. `onSuccess` and
+`onError` are called at most once. `onSettled` is called exactly once for every
+started generation except `scope-changed`, which is intentionally silent.
 
 Cancellation and state:
 

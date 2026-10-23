@@ -34,4 +34,7 @@ pnpm test:e2e
 
 ## Releasing
 
-Releasing is a manual, reviewed step. Do not publish from a branch build.
+Releasing is a manual, reviewed step. Do not publish from a branch build. See
+[RELEASING.md](RELEASING.md) for the complete gate, package-content checks,
+version/changelog steps, metadata requirements and publication/rollback
+procedure.

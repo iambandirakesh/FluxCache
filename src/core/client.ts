@@ -648,9 +648,13 @@ export class FluxCacheClient {
     }
 
     if (entry.hasData && !entry.dirty && !this.isEntryStale(entry)) {
-      this.counters.hits += 1;
       this.consumePrefetch(entry, 'cache-hit');
+      // A diagnostics listener may change scope synchronously. Never hand the
+      // old scope's cached payload to a caller that is now in a new scope.
+      if (!this.isEntryActive(entry)) return this.scopeChangedOutcome<T>();
       this.emit({ type: 'cache:hit', keyHash: entry.eventHash, at: this.now() });
+      if (!this.isEntryActive(entry)) return this.scopeChangedOutcome<T>();
+      this.counters.hits += 1;
       return {
         settled: 'skipped',
         skipReason: 'fresh',
@@ -910,7 +914,6 @@ export class FluxCacheClient {
     keepAlive: boolean,
     origin: 'query' | 'prefetch' = 'query',
   ): { fetch: InFlightFetch; token: FetchToken; promise: Promise<QueryOutcome<unknown>> } {
-    if (entry.prefetch) this.wastePrefetch(entry, 'new-request');
     let resolve!: (outcome: QueryOutcome<unknown>) => void;
     const promise = new Promise<QueryOutcome<unknown>>((resolvePromise) => {
       resolve = resolvePromise;
@@ -939,6 +942,14 @@ export class FluxCacheClient {
     const token = this.join(fetch, keepAlive);
     this.counters.fetchesStarted += 1;
     this.emit({ type: 'fetch:start', keyHash: entry.eventHash, at: this.now() });
+    // Diagnostics listeners are arbitrary user code. Emit the metric event
+    // only after the fetch exists so a listener that cancels, removes or
+    // switches scope can settle this promise instead of stranding it.
+    if (entry.prefetch) this.wastePrefetch(entry, 'new-request');
+    if (!this.isSetupCurrent(entry, fetch)) {
+      if (entry.inFlight === fetch) this.detach(entry, 'scope-changed');
+      return { fetch, token, promise };
+    }
     void this.runRequest(entry, fetch);
     return { fetch, token, promise };
   }
@@ -989,6 +1000,23 @@ export class FluxCacheClient {
     }
   }
 
+  private isEntryActive(entry: CacheEntry): boolean {
+    return entry.scopeTag === this.tag && this.entries.get(entry.keyHash) === entry;
+  }
+
+  private scopeChangedOutcome<T>(): QueryOutcome<T> {
+    return { settled: 'scope-changed', data: undefined, dataUpdatedAt: null };
+  }
+
+  private isSetupCurrent(entry: CacheEntry, fetch: InFlightFetch): boolean {
+    return (
+      !fetch.settled &&
+      entry.inFlight === fetch &&
+      entry.scopeTag === this.tag &&
+      this.entries.get(entry.keyHash) === entry
+    );
+  }
+
   private isCurrent(entry: CacheEntry, fetch: InFlightFetch): boolean {
     return (
       !fetch.settled &&
@@ -1027,6 +1055,10 @@ export class FluxCacheClient {
 
   private commit(entry: CacheEntry, fetch: InFlightFetch, value: unknown): void {
     if (entry.prefetch) this.wastePrefetch(entry, 'replaced');
+    // The waste event is user code. It may have superseded, cancelled or
+    // dropped this request; never write after that.
+    if (fetch.settled) return;
+
     entry.data = value;
     entry.hasData = true;
     entry.dataUpdatedAt = this.now();
@@ -1034,26 +1066,32 @@ export class FluxCacheClient {
     entry.errorUpdatedAt = null;
     entry.dirty = false;
     entry.failureCount = 0;
-    entry.inFlight = null;
     this.counters.fetchesSucceeded += 1;
+
     if (fetch.origin === 'prefetch') {
       this.counters.prefetchProduced += 1;
       entry.prefetch = { generation: fetch.generation };
       this.emit({ type: 'prefetch:produced', keyHash: entry.eventHash, at: this.now() });
+      // Keep `entry.inFlight` attached while diagnostics listeners run so a
+      // listener that supersedes or drops this request settles it normally.
+      if (fetch.settled) return;
       if (entry.observers.size > 0 || fetch.hasKeepAlive) {
         this.consumePrefetch(entry, 'joined');
+        if (fetch.settled) return;
       }
     }
+
+    entry.inFlight = null;
     this.settle(fetch, {
       settled: 'fulfilled',
       source: 'network',
       data: value as never,
       dataUpdatedAt: entry.dataUpdatedAt,
     });
-    this.emit({ type: 'fetch:success', keyHash: entry.eventHash, at: this.now() });
     this.scheduleStaleTimer(entry);
     this.scheduleGcIfIdle(entry);
     this.notifyEntry(entry);
+    this.emit({ type: 'fetch:success', keyHash: entry.eventHash, at: this.now() });
   }
 
   private fail(entry: CacheEntry, fetch: InFlightFetch, error: unknown): void {

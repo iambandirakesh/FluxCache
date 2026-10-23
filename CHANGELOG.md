@@ -58,3 +58,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `FluxCacheStats` gained required prefetch-effectiveness members. Code that
   constructs the object literally or compares it with exact deep equality must
   add the new fields; normal `getStats()` consumers are unaffected.
+- `@internal` cache-engine methods are omitted from generated declarations, and
+  the package includes the docs and benchmark README linked from the main
+  README. The runtime engine surface is unchanged.
+
+### Fixed
+
+- Prefetch diagnostic events are emitted only after a request is registered, so
+  a listener that cancels or switches scope cannot strand a fetch promise.
+- Rejected promises returned by asynchronous mutation callbacks are logged and
+  contained instead of becoming unhandled rejections.
+- The README query-key example uses valid TypeScript, and package-relative
+  documentation links no longer point at files missing from the npm tarball.

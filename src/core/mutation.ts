@@ -341,10 +341,15 @@ export class MutationRunner<TData, TVariables, TContext = undefined> {
     name: keyof MutationOptions<TData, TVariables, TContext>,
     ...args: unknown[]
   ): void {
-    const callback = this.options[name] as ((...callbackArgs: unknown[]) => void) | undefined;
+    const callback = this.options[name] as ((...callbackArgs: unknown[]) => unknown) | undefined;
     if (typeof callback !== 'function') return;
     try {
-      callback(...args);
+      const result = callback(...args);
+      if (result !== null && typeof result === 'object' && 'then' in result) {
+        void Promise.resolve(result).catch((error: unknown) => {
+          this.warn(`${String(name)} rejected; the mutation outcome is unchanged`, error);
+        });
+      }
     } catch (error) {
       this.warn(`${String(name)} threw; the mutation outcome is unchanged`, error);
     }

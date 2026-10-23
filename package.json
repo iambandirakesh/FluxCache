@@ -4,6 +4,14 @@
   "description": "Predictable caching, request deduplication and invalidation for React data fetching.",
   "license": "MIT",
   "author": "FluxCache contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iambandirakesh/FluxCache.git"
+  },
+  "homepage": "https://github.com/iambandirakesh/FluxCache#readme",
+  "bugs": {
+    "url": "https://github.com/iambandirakesh/FluxCache/issues"
+  },
   "type": "module",
   "sideEffects": false,
   "packageManager": "pnpm@10.5.2",
@@ -12,6 +20,8 @@
   },
   "files": [
     "dist",
+    "docs",
+    "bench/README.md",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"

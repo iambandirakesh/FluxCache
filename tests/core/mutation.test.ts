@@ -239,6 +239,25 @@ describe('MutationRunner', () => {
     expect(runner.getSnapshot()).toMatchObject({ status: 'idle' });
   });
 
+  it('contains asynchronous callback rejections without changing the outcome', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { runner } = runnerFor<string, string>({
+      mutationFn: async () => 'ok',
+      onSuccess: async () => {
+        throw new Error('async success failed');
+      },
+    });
+
+    const outcome = await runner.mutateAsync('value');
+    await flushMicrotasks();
+    expect(outcome.settled).toBe('fulfilled');
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('onSuccess rejected'),
+      expect.any(Error),
+    );
+    warn.mockRestore();
+  });
+
   it('contains callback failures without changing the outcome', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const onSettled = vi.fn();
